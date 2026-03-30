@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Catalia</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      color: #1a1a1a;
+      background: #fff;
+    }
+
+    /* ── Header ── */
+    header {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      background: #570047;
+      color: #fff;
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      z-index: 100;
+      box-shadow: 0 2px 8px rgba(87, 0, 71, 0.4);
+    }
+
+    header h1 {
+      font-size: clamp(1.25rem, 3vw, 1.75rem);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    nav a {
+      color: rgba(255, 255, 255, 0.85);
+      text-decoration: none;
+      margin-left: 1.5rem;
+      font-size: 0.95rem;
+      transition: color 0.2s;
+    }
+
+    nav a:hover {
+      color: #FE9900;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 6rem 1.5rem 3rem;
+      background: linear-gradient(135deg, #f9f0f8 0%, #fff4e6 100%);
+    }
+
+    .hero h2 {
+      font-size: clamp(2rem, 6vw, 3.5rem);
+      font-weight: 800;
+      color: #570047;
+      line-height: 1.15;
+      margin-bottom: 1.25rem;
+    }
+
+    .hero p {
+      font-size: clamp(1rem, 2.5vw, 1.25rem);
+      color: #555;
+      max-width: 600px;
+      line-height: 1.7;
+      margin-bottom: 2.25rem;
+    }
+
+    .btn {
+      display: inline-block;
+      background: #FE9900;
+      color: #fff;
+      font-size: 1.05rem;
+      font-weight: 600;
+      padding: 0.85rem 2.25rem;
+      border-radius: 50px;
+      text-decoration: none;
+      box-shadow: 0 4px 14px rgba(254, 153, 0, 0.45);
+      transition: transform 0.2s, box-shadow 0.2s, background 0.2s;
+    }
+
+    .btn:hover {
+      background: #e08700;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(254, 153, 0, 0.55);
+    }
+
+    .btn:active {
+      transform: translateY(0);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 600px) {
+      nav {
+        display: none;
+      }
+
+      .hero {
+        padding-top: 5rem;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Catalia</h1>
+    <nav>
+      <a href="#">Accueil</a>
+      <a href="#">À propos</a>
+      <a href="#">Contact</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h2>Bienvenue sur Catalia</h2>
+    <p>Découvrez une expérience unique, pensée pour vous. Nous mettons l'innovation au service de vos besoins.</p>
+    <a href="#" class="btn">En savoir plus</a>
+  </section>
+
+</body>
+</html>
