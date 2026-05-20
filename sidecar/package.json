@@ -1,0 +1,13 @@
+{
+  "name": "claude-dashboard-sidecar",
+  "version": "0.1.0",
+  "description": "Local sidecar that watches Claude Code sessions on disk and exposes status to the dashboard.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
