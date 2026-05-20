@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Tasks Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --panel-2: #1f232c;
+      --border: #2a2f3a;
+      --text: #e6e8ee;
+      --muted: #9aa3b2;
+      --accent: #c98a5d;
+      --accent-2: #7aa2f7;
+      --danger: #e06c75;
+      --ok: #98c379;
+      --radius: 10px;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --panel-2: #f0f2f6;
+        --border: #e1e4ea;
+        --text: #1c1f26;
+        --muted: #5b6472;
+        --accent: #c2410c;
+        --accent-2: #2563eb;
+        --danger: #b91c1c;
+        --ok: #15803d;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .container { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
+    header { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
+    h1 { margin: 0; font-size: 1.5rem; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+    button, .btn {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      border-radius: var(--radius);
+      font-size: 0.9rem;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    button:hover, .btn:hover { border-color: var(--accent); }
+    button.primary, .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.primary:hover { filter: brightness(1.1); }
+    button.danger { color: var(--danger); }
+    button.ghost { background: transparent; }
+    .btn[aria-disabled="true"] { opacity: 0.45; pointer-events: none; }
+
+    .tasks { display: grid; gap: 12px; }
+    .task {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+    .task h3 { margin: 0 0 4px; font-size: 1.05rem; }
+    .task .desc { color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+    .task .meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 10px; display: flex; gap: 12px; flex-wrap: wrap; }
+    .task .meta code { background: var(--panel-2); padding: 1px 6px; border-radius: 4px; }
+    .task-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .task-actions .sep { flex: 1; }
+
+    .empty {
+      text-align: center;
+      padding: 40px 16px;
+      color: var(--muted);
+      border: 1px dashed var(--border);
+      border-radius: var(--radius);
+    }
+
+    dialog {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0;
+      max-width: 640px;
+      width: 92%;
+    }
+    dialog::backdrop { background: rgba(0,0,0,0.5); }
+    .modal-header, .modal-footer { padding: 14px 16px; }
+    .modal-header { border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .modal-body { padding: 16px; display: grid; gap: 12px; }
+    .modal-footer { border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
+    input[type="text"], textarea {
+      width: 100%;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 8px 10px;
+      font-family: inherit;
+      font-size: 0.95rem;
+    }
+    textarea { min-height: 140px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
+    .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 520px) { .field-row { grid-template-columns: 1fr; } }
+    .hint { font-size: 0.8rem; color: var(--muted); }
+    .warn { color: var(--danger); }
+
+    .toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: var(--panel-2); border: 1px solid var(--border); padding: 10px 14px;
+      border-radius: var(--radius); font-size: 0.9rem; opacity: 0; transition: opacity 0.2s;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+
+    .badge {
+      font-size: 0.75rem; padding: 2px 8px; border-radius: 999px;
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Claude Tasks Dashboard</h1>
+        <div class="subtitle">Lance tes prompts récurrents dans Claude Desktop, Claude Code ou VS Code en un clic.</div>
+      </div>
+      <div class="toolbar">
+        <button id="add-btn" class="primary">+ Nouvelle tâche</button>
+        <button id="export-btn" class="ghost">Exporter</button>
+        <button id="import-btn" class="ghost">Importer</button>
+        <input type="file" id="import-file" accept="application/json" hidden />
+      </div>
+    </header>
+
+    <div id="tasks" class="tasks"></div>
+
+    <dialog id="editor">
+      <form method="dialog">
+        <div class="modal-header">
+          <strong id="editor-title">Nouvelle tâche</strong>
+          <button type="button" id="close-btn" class="ghost" aria-label="Fermer">✕</button>
+        </div>
+        <div class="modal-body">
+          <div>
+            <label for="f-title">Titre</label>
+            <input type="text" id="f-title" required maxlength="120" placeholder="Ex: Revue de PR quotidienne" />
+          </div>
+          <div>
+            <label for="f-desc">Description <span class="hint">(optionnel)</span></label>
+            <input type="text" id="f-desc" maxlength="240" placeholder="Courte description affichée sous le titre" />
+          </div>
+          <div>
+            <label for="f-prompt">Prompt</label>
+            <textarea id="f-prompt" required placeholder="Le prompt qui sera pré-rempli dans Claude…"></textarea>
+            <div class="hint" id="prompt-hint">0 caractères</div>
+          </div>
+          <div class="field-row">
+            <div>
+              <label for="f-repo">Repo GitHub <span class="hint">(owner/name, optionnel)</span></label>
+              <input type="text" id="f-repo" placeholder="acme/payments" />
+            </div>
+            <div>
+              <label for="f-cwd">Chemin local <span class="hint">(absolu, optionnel)</span></label>
+              <input type="text" id="f-cwd" placeholder="/Users/moi/code/projet" />
+            </div>
+          </div>
+          <div class="hint">Si les deux sont fournis, <code>cwd</code> a la priorité pour Claude Code.</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="delete-btn" class="danger" hidden>Supprimer</button>
+          <span style="flex:1"></span>
+          <button type="button" id="cancel-btn" class="ghost">Annuler</button>
+          <button type="button" id="save-btn" class="primary">Enregistrer</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+
+  <script>
+    const STORAGE_KEY = 'claude-dashboard:tasks:v1';
+    const LIMITS = { desktop: 14000, code: 5000 };
+
+    const tasksEl = document.getElementById('tasks');
+    const dialog = document.getElementById('editor');
+    const editorTitle = document.getElementById('editor-title');
+    const fTitle = document.getElementById('f-title');
+    const fDesc = document.getElementById('f-desc');
+    const fPrompt = document.getElementById('f-prompt');
+    const fRepo = document.getElementById('f-repo');
+    const fCwd = document.getElementById('f-cwd');
+    const promptHint = document.getElementById('prompt-hint');
+    const deleteBtn = document.getElementById('delete-btn');
+
+    let editingId = null;
+
+    function uid() {
+      return 't_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+    }
+    function load() {
+      try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
+      catch { return []; }
+    }
+    function save(tasks) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
+    }
+
+    function desktopUrl(prompt) {
+      return `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`;
+    }
+    function buildCodeParams({ prompt, repo, cwd }) {
+      const p = new URLSearchParams();
+      if (cwd && cwd.trim()) p.set('cwd', cwd.trim());
+      else if (repo && repo.trim()) p.set('repo', repo.trim());
+      p.set('q', prompt);
+      return p.toString();
+    }
+    function claudeCodeUrl(task) {
+      return `claude-cli://open?${buildCodeParams(task)}`;
+    }
+    function vscodeUrl(task) {
+      return `vscode://anthropic.claude-code/open?${buildCodeParams(task)}`;
+    }
+
+    function render() {
+      const tasks = load();
+      tasksEl.innerHTML = '';
+      if (tasks.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'empty';
+        empty.innerHTML = `Aucune tâche pour le moment. Clique sur <strong>+ Nouvelle tâche</strong> pour commencer.`;
+        tasksEl.appendChild(empty);
+        return;
+      }
+      for (const t of tasks) {
+        const card = document.createElement('div');
+        card.className = 'task';
+        const desktopOver = t.prompt.length > LIMITS.desktop;
+        const codeOver = t.prompt.length > LIMITS.code;
+
+        const meta = [];
+        if (t.repo) meta.push(`<code>${escapeHtml(t.repo)}</code>`);
+        if (t.cwd) meta.push(`<code>${escapeHtml(t.cwd)}</code>`);
+        meta.push(`<span class="badge">${t.prompt.length} car.</span>`);
+
+        card.innerHTML = `
+          <h3>${escapeHtml(t.title)}</h3>
+          ${t.desc ? `<p class="desc">${escapeHtml(t.desc)}</p>` : ''}
+          <div class="meta">${meta.join('')}</div>
+          <div class="task-actions">
+            <a class="btn" data-action="desktop" ${desktopOver ? 'aria-disabled="true" title="Prompt trop long pour Claude Desktop"' : ''}>Desktop</a>
+            <a class="btn" data-action="code" ${codeOver ? 'aria-disabled="true" title="Prompt trop long pour Claude Code"' : ''}>Claude Code</a>
+            <a class="btn" data-action="vscode" ${codeOver ? 'aria-disabled="true" title="Prompt trop long pour VS Code"' : ''}>VS Code</a>
+            <button data-action="copy" class="ghost" title="Copier le prompt">Copier</button>
+            <span class="sep"></span>
+            <button data-action="edit" class="ghost">Éditer</button>
+          </div>
+        `;
+        const desktopBtn = card.querySelector('[data-action="desktop"]');
+        const codeBtn = card.querySelector('[data-action="code"]');
+        const vscodeBtn = card.querySelector('[data-action="vscode"]');
+        if (!desktopOver) desktopBtn.href = desktopUrl(t.prompt);
+        if (!codeOver) codeBtn.href = claudeCodeUrl(t);
+        if (!codeOver) vscodeBtn.href = vscodeUrl(t);
+
+        card.querySelector('[data-action="copy"]').addEventListener('click', () => copyPrompt(t.prompt));
+        card.querySelector('[data-action="edit"]').addEventListener('click', () => openEditor(t.id));
+
+        tasksEl.appendChild(card);
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+    }
+
+    function openEditor(id) {
+      editingId = id || null;
+      if (id) {
+        const t = load().find(x => x.id === id);
+        if (!t) return;
+        editorTitle.textContent = 'Modifier la tâche';
+        fTitle.value = t.title;
+        fDesc.value = t.desc || '';
+        fPrompt.value = t.prompt;
+        fRepo.value = t.repo || '';
+        fCwd.value = t.cwd || '';
+        deleteBtn.hidden = false;
+      } else {
+        editorTitle.textContent = 'Nouvelle tâche';
+        fTitle.value = '';
+        fDesc.value = '';
+        fPrompt.value = '';
+        fRepo.value = '';
+        fCwd.value = '';
+        deleteBtn.hidden = true;
+      }
+      updatePromptHint();
+      dialog.showModal();
+      setTimeout(() => fTitle.focus(), 0);
+    }
+
+    function updatePromptHint() {
+      const len = fPrompt.value.length;
+      let msg = `${len} caractères`;
+      const warns = [];
+      if (len > LIMITS.code) warns.push(`au-delà de la limite Claude Code (${LIMITS.code})`);
+      if (len > LIMITS.desktop) warns.push(`au-delà de la limite Claude Desktop (${LIMITS.desktop})`);
+      if (warns.length) {
+        promptHint.innerHTML = `${len} caractères — <span class="warn">${warns.join(', ')}</span>`;
+      } else {
+        promptHint.textContent = msg;
+      }
+    }
+    fPrompt.addEventListener('input', updatePromptHint);
+
+    function saveFromForm() {
+      const title = fTitle.value.trim();
+      const prompt = fPrompt.value;
+      if (!title) { fTitle.reportValidity(); return; }
+      if (!prompt.trim()) { fPrompt.reportValidity(); return; }
+      const tasks = load();
+      const data = {
+        title,
+        desc: fDesc.value.trim(),
+        prompt,
+        repo: fRepo.value.trim(),
+        cwd: fCwd.value.trim(),
+      };
+      if (editingId) {
+        const i = tasks.findIndex(t => t.id === editingId);
+        if (i >= 0) tasks[i] = { ...tasks[i], ...data };
+      } else {
+        tasks.push({ id: uid(), ...data });
+      }
+      save(tasks);
+      dialog.close();
+      render();
+      toast(editingId ? 'Tâche mise à jour' : 'Tâche ajoutée');
+    }
+
+    function deleteCurrent() {
+      if (!editingId) return;
+      if (!confirm('Supprimer cette tâche ?')) return;
+      save(load().filter(t => t.id !== editingId));
+      dialog.close();
+      render();
+      toast('Tâche supprimée');
+    }
+
+    async function copyPrompt(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast('Prompt copié');
+      } catch {
+        toast('Impossible de copier');
+      }
+    }
+
+    function exportTasks() {
+      const blob = new Blob([JSON.stringify(load(), null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `claude-tasks-${new Date().toISOString().slice(0,10)}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    function importTasks(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const parsed = JSON.parse(reader.result);
+          if (!Array.isArray(parsed)) throw new Error('Format invalide');
+          const cleaned = parsed
+            .filter(t => t && typeof t.title === 'string' && typeof t.prompt === 'string')
+            .map(t => ({
+              id: t.id || uid(),
+              title: t.title,
+              desc: t.desc || '',
+              prompt: t.prompt,
+              repo: t.repo || '',
+              cwd: t.cwd || '',
+            }));
+          if (cleaned.length === 0) throw new Error('Aucune tâche valide');
+          const merge = confirm(`${cleaned.length} tâche(s) trouvée(s). OK = ajouter aux existantes, Annuler = remplacer tout.`);
+          const next = merge ? [...load(), ...cleaned] : cleaned;
+          save(next);
+          render();
+          toast(`${cleaned.length} tâche(s) importée(s)`);
+        } catch (e) {
+          toast('Import échoué : ' + e.message);
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    function toast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => el.classList.remove('show'), 1800);
+    }
+
+    document.getElementById('add-btn').addEventListener('click', () => openEditor(null));
+    document.getElementById('export-btn').addEventListener('click', exportTasks);
+    document.getElementById('import-btn').addEventListener('click', () => document.getElementById('import-file').click());
+    document.getElementById('import-file').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (file) importTasks(file);
+      e.target.value = '';
+    });
+    document.getElementById('save-btn').addEventListener('click', saveFromForm);
+    document.getElementById('cancel-btn').addEventListener('click', () => dialog.close());
+    document.getElementById('close-btn').addEventListener('click', () => dialog.close());
+    deleteBtn.addEventListener('click', deleteCurrent);
+
+    if (load().length === 0) {
+      save([
+        {
+          id: uid(),
+          title: 'Exemple : revue rapide du repo',
+          desc: 'Demande un résumé de l\'état du repo et des priorités du jour.',
+          prompt: 'Fais un état des lieux rapide du repo : branche actuelle, fichiers modifiés non commités, derniers commits, et propose 3 priorités pour aujourd\'hui.',
+          repo: '',
+          cwd: '',
+        },
+      ]);
+    }
+    render();
+  </script>
+</body>
+</html>
