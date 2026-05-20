@@ -145,18 +145,28 @@
       font-size: 0.92rem;
     }
     .session:hover { background: var(--panel-2); }
-    .dot { width: 9px; height: 9px; border-radius: 50%; justify-self: center; }
-    .dot.working { background: var(--accent-2); animation: pulse 1.4s infinite; }
-    .dot.unread  { background: var(--ok); animation: pulse 1.4s infinite; }
-    .dot.read    { background: var(--ok); }
-    .dot.idle    { background: var(--muted); opacity: 0.5; }
+    .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; justify-self: center; }
+    .dot.working { background: #2563eb; animation: pulse 1.4s infinite; }
+    .dot.unread  { background: #16a34a; animation: pulse 1.4s infinite; }
+    .dot.read    { background: #16a34a; }
+    .dot.idle    { background: #9ca3af; opacity: 0.5; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
     .session.idle { opacity: 0.55; }
     .session { cursor: pointer; user-select: none; }
     .session-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-status { font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; margin-left: 6px; vertical-align: middle; }
+    .session-status.working { background: rgba(37,99,235,0.15); color: #2563eb; }
+    .session-status.unread  { background: rgba(22,163,74,0.18); color: #15803d; font-weight: 500; }
+    .session-status.read    { background: var(--panel-2); color: var(--muted); }
+    .session-status.idle    { background: var(--panel-2); color: var(--muted); }
     .session-when  { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
     .session-project { color: var(--muted); font-size: 0.78rem; margin-left: 8px; }
+
+    .status-tabs { display: flex; gap: 8px; margin-bottom: 12px; font-size: 0.85rem; }
+    .status-tab { padding: 4px 10px; border-radius: 999px; cursor: pointer; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+    .status-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .status-tab .num { opacity: 0.7; margin-left: 4px; }
 
     .sidecar-banner {
       background: var(--panel-2); border: 1px dashed var(--border);
@@ -188,6 +198,7 @@
         <h2>Sessions récentes</h2>
         <span class="count" id="sessions-count"></span>
       </div>
+      <div class="status-tabs" id="status-tabs"></div>
       <div id="sessions-list" class="sessions-list"></div>
     </section>
 
@@ -513,11 +524,13 @@
     }
 
     const STATUS_LABEL = {
-      working: 'Claude travaille',
-      unread:  'fini — pas encore lu',
-      read:    'fini et lu',
+      working: 'en cours',
+      unread:  'pas encore lu',
+      read:    'lu',
       idle:    'inactive',
     };
+    const FILTERS = ['actifs', 'tout'];
+    let currentFilter = 'actifs'; // 'actifs' hides idle; 'tout' shows everything
 
     // Combine sidecar status + local read-state to determine final visual class
     function visualStatus(s) {
@@ -550,24 +563,46 @@
 
     function renderSessions() {
       if (!sidecarAlive) return;
-      if (!liveSessions.length) {
-        sessionsCountEl.textContent = '0';
-        sessionsListEl.innerHTML = `<div class="sidecar-banner">Aucune session active dans les dernières 24h.</div>`;
+      const tabsEl = document.getElementById('status-tabs');
+
+      // counts by visual status
+      const counts = { working: 0, unread: 0, read: 0, idle: 0 };
+      const enriched = liveSessions.map(s => {
+        const v = visualStatus(s);
+        counts[v] = (counts[v] || 0) + 1;
+        return { s, v };
+      });
+
+      tabsEl.innerHTML = FILTERS.map(f => {
+        const label = f === 'actifs'
+          ? `Actifs <span class="num">${counts.working + counts.unread + counts.read}</span>`
+          : `Tout <span class="num">${liveSessions.length}</span>`;
+        return `<button class="status-tab ${f === currentFilter ? 'active' : ''}" data-filter="${f}">${label}</button>`;
+      }).join('');
+      tabsEl.querySelectorAll('.status-tab').forEach(b => {
+        b.addEventListener('click', () => { currentFilter = b.dataset.filter; renderSessions(); });
+      });
+
+      sessionsCountEl.textContent =
+        `${counts.working} en cours • ${counts.unread} non lus • ${counts.read} lus • ${counts.idle} inactives`;
+
+      const visible = enriched.filter(({ v }) => currentFilter === 'tout' || v !== 'idle');
+      if (!visible.length) {
+        sessionsListEl.innerHTML = `<div class="sidecar-banner">Aucune session dans cette catégorie.</div>`;
         return;
       }
-      sessionsCountEl.textContent = liveSessions.length;
-      sessionsListEl.innerHTML = liveSessions.map(s => {
-        const v = visualStatus(s);
-        return `
+
+      sessionsListEl.innerHTML = visible.map(({ s, v }) => `
         <div class="session ${v}" data-session-id="${escapeHtml(s.sessionId)}" data-event-time="${s.lastEventTime}" title="${escapeHtml(STATUS_LABEL[v] || v)} — clic pour ouvrir et marquer lu">
           <span class="dot ${v}"></span>
           <div class="session-title">
             ${escapeHtml(s.title || s.sessionId.slice(0, 8) + '…')}
+            <span class="session-status ${v}">${STATUS_LABEL[v]}</span>
             ${s.project ? `<span class="session-project">${escapeHtml(s.project)}</span>` : ''}
           </div>
           <span class="session-when">${relTime(s.lastEventTime)}</span>
-        </div>`;
-      }).join('');
+        </div>
+      `).join('');
       sessionsListEl.querySelectorAll('.session').forEach(el => {
         el.addEventListener('click', () => {
           const id = el.dataset.sessionId;
