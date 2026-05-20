@@ -20,12 +20,17 @@ const PROJECTS_DIR = path.join(homedir(), '.claude', 'projects');
 const PORT = parseInt(process.env.PORT || '8765', 10);
 
 // Status thresholds aligned with Claude Code's own sidebar:
-//   blue dot   = currently working OR just finished, awaiting your eyes
-//   brown dot  = older, still waiting on action from you
-//   hidden     = > 24h, irrelevant
+//   blue pulse    = actively writing right now
+//   green pulse   = finished, unread (atime <= mtime: file hasn't been opened since
+//                   the last assistant write)
+//   green solid   = finished, read (atime > mtime: user opened the session)
+//   red pulse     = stuck on a tool_use for > NEEDS_ACTION_MS, likely a permission
+//                   prompt or other blocked-on-user state
+//   gray (idle)   = > 24h with no activity, displayed dimmed
 const VERY_RECENT_MS   = 60 * 1000;
-const READY_WINDOW_MS  = 60 * 60 * 1000;
-const STALE_MS         = 24 * 60 * 60 * 1000;
+const NEEDS_ACTION_MS  = 5 * 60 * 1000;
+const IDLE_MS          = 24 * 60 * 60 * 1000;       // grayed after 24h
+const HIDDEN_MS        = 7 * 24 * 60 * 60 * 1000;   // dropped after 7d
 const POLL_INTERVAL_MS = 2000;
 const GIT_POLL_MS      = 30000;
 const TAIL_BYTES       = 32 * 1024;
@@ -54,10 +59,10 @@ function parseLines(text, dropFirst) {
   return out;
 }
 
-function deriveStatus({ lastEvent, lastEventTime, mtimeMs, branchMerged }) {
-  const age = Date.now() - Math.max(lastEventTime || 0, mtimeMs || 0);
-  if (age > STALE_MS && !branchMerged) return 'hidden';
-  if (branchMerged) return 'merged';
+function deriveStatus({ lastEvent, lastEventTime, mtimeMs, atimeMs }) {
+  const ref = Math.max(lastEventTime || 0, mtimeMs || 0);
+  const age = Date.now() - ref;
+  if (age > IDLE_MS) return 'idle';
 
   const type = lastEvent?.type;
   const stopReason = lastEvent?.message?.stop_reason;
@@ -65,15 +70,19 @@ function deriveStatus({ lastEvent, lastEventTime, mtimeMs, branchMerged }) {
   if (age < VERY_RECENT_MS) return 'working';
 
   if (type === 'assistant' && stopReason === 'end_turn') {
-    return age < READY_WINDOW_MS ? 'ready' : 'pending';
+    // atime is updated when something reads the file after the assistant
+    // wrote (Claude Code opens it on resume, the dashboard does not). If the
+    // user opened the session in the UI, atime > mtime; otherwise unread.
+    const wasOpened = atimeMs && atimeMs > mtimeMs + 1000;
+    return wasOpened ? 'read' : 'unread';
   }
   if (type === 'assistant' && stopReason === 'tool_use') {
-    return age < READY_WINDOW_MS ? 'working' : 'pending';
+    return age > NEEDS_ACTION_MS ? 'needs_action' : 'working';
   }
   if (type === 'user') {
-    return age < READY_WINDOW_MS ? 'working' : 'pending';
+    return age < NEEDS_ACTION_MS ? 'working' : 'needs_action';
   }
-  return 'pending';
+  return 'idle';
 }
 
 async function scanFile(filePath) {
@@ -108,13 +117,18 @@ async function scanFile(filePath) {
   const mergedKey = cwd && gitBranch ? `${cwd}::${gitBranch}` : null;
   const branchMerged = mergedKey ? mergedBranches.get(mergedKey) === true : false;
 
-  const status = deriveStatus({ lastEvent, lastEventTime, mtimeMs: st.mtimeMs, branchMerged });
-  if (status === 'hidden') return null;
+  const status = deriveStatus({
+    lastEvent,
+    lastEventTime,
+    mtimeMs: st.mtimeMs,
+    atimeMs: st.atimeMs,
+  });
 
   return {
     sessionId,
     filePath,
     project: cwd ? path.basename(cwd) : path.basename(path.dirname(filePath)),
+    cwd,
     gitBranch,
     title: aiTitle,
     lastEventTime: Math.max(lastEventTime || 0, st.mtimeMs),
@@ -134,8 +148,10 @@ async function listRecentJsonl(dir, out = []) {
     } else if (e.isFile() && e.name.endsWith('.jsonl')) {
       const st = await safeStat(p);
       if (!st) continue;
-      // Pre-filter by mtime — skip stale files without I/O to keep the loop cheap
-      if (Date.now() - st.mtimeMs > STALE_MS) continue;
+      // Pre-filter: drop sessions older than the hidden threshold (~7d) before
+      // touching them. Anything within that window is kept so we can show it
+      // grayed if it crosses into idle territory.
+      if (Date.now() - st.mtimeMs > HIDDEN_MS) continue;
       out.push(p);
     }
   }
@@ -160,7 +176,7 @@ async function fullScan() {
 }
 
 function snapshot() {
-  const order = { working: 0, ready: 1, pending: 2, merged: 3 };
+  const order = { needs_action: 0, working: 1, unread: 2, read: 3, idle: 4 };
   return Array.from(sessions.values()).sort((a, b) => {
     const oa = order[a.status] ?? 99, ob = order[b.status] ?? 99;
     if (oa !== ob) return oa - ob;
