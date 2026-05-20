@@ -146,11 +146,10 @@
     }
     .session:hover { background: var(--panel-2); }
     .dot { width: 9px; height: 9px; border-radius: 50%; justify-self: center; }
-    .dot.working      { background: var(--accent-2); animation: pulse 1.4s infinite; }
-    .dot.unread       { background: var(--ok); animation: pulse 1.4s infinite; }
-    .dot.read         { background: var(--ok); }
-    .dot.needs_action { background: var(--danger); animation: pulse 1.4s infinite; }
-    .dot.idle         { background: var(--muted); opacity: 0.5; }
+    .dot.working { background: var(--accent-2); animation: pulse 1.4s infinite; }
+    .dot.unread  { background: var(--ok); animation: pulse 1.4s infinite; }
+    .dot.read    { background: var(--ok); }
+    .dot.idle    { background: var(--muted); opacity: 0.5; }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
     .session.idle { opacity: 0.55; }
@@ -500,13 +499,35 @@
     let liveSessions = [];
     let sidecarAlive = false;
 
+    const READ_KEY = 'claude-dashboard:read:v1';
+    const readMap = (() => {
+      try { return new Map(Object.entries(JSON.parse(localStorage.getItem(READ_KEY) || '{}'))); }
+      catch { return new Map(); }
+    })();
+    function saveReadMap() {
+      localStorage.setItem(READ_KEY, JSON.stringify(Object.fromEntries(readMap)));
+    }
+    function markRead(sessionId, eventTime) {
+      readMap.set(sessionId, eventTime);
+      saveReadMap();
+    }
+
     const STATUS_LABEL = {
-      working:      'Claude travaille',
-      unread:       'fini — pas encore lu',
-      read:         'fini et lu',
-      needs_action: 'action attendue de toi',
-      idle:         'inactive',
+      working: 'Claude travaille',
+      unread:  'fini — pas encore lu',
+      read:    'fini et lu',
+      idle:    'inactive',
     };
+
+    // Combine sidecar status + local read-state to determine final visual class
+    function visualStatus(s) {
+      if (s.status === 'working') return 'working';
+      if (s.status === 'idle')    return 'idle';
+      // sidecar said 'awaiting' → split into unread/read based on local memory
+      const seenAt = readMap.get(s.sessionId);
+      if (seenAt && seenAt >= s.lastEventTime) return 'read';
+      return 'unread';
+    }
 
     function relTime(ms) {
       const s = Math.round((Date.now() - ms) / 1000);
@@ -535,37 +556,42 @@
         return;
       }
       sessionsCountEl.textContent = liveSessions.length;
-      sessionsListEl.innerHTML = liveSessions.map(s => `
-        <div class="session ${s.status}" data-session-id="${escapeHtml(s.sessionId)}" title="${escapeHtml(STATUS_LABEL[s.status] || s.status)} — clic pour ouvrir">
-          <span class="dot ${s.status}"></span>
+      sessionsListEl.innerHTML = liveSessions.map(s => {
+        const v = visualStatus(s);
+        return `
+        <div class="session ${v}" data-session-id="${escapeHtml(s.sessionId)}" data-event-time="${s.lastEventTime}" title="${escapeHtml(STATUS_LABEL[v] || v)} — clic pour ouvrir et marquer lu">
+          <span class="dot ${v}"></span>
           <div class="session-title">
             ${escapeHtml(s.title || s.sessionId.slice(0, 8) + '…')}
             ${s.project ? `<span class="session-project">${escapeHtml(s.project)}</span>` : ''}
           </div>
           <span class="session-when">${relTime(s.lastEventTime)}</span>
-        </div>
-      `).join('');
-      // Wire click handlers
+        </div>`;
+      }).join('');
       sessionsListEl.querySelectorAll('.session').forEach(el => {
-        el.addEventListener('click', () => openClaudeCodeSession(el.dataset.sessionId));
+        el.addEventListener('click', () => {
+          const id = el.dataset.sessionId;
+          const t = parseInt(el.dataset.eventTime, 10);
+          markRead(id, t);
+          renderSessions();
+          openClaudeCodeSession(id);
+        });
       });
     }
 
     async function openClaudeCodeSession(sessionId) {
       if (!sessionId) return;
-      // 1) Try the (undocumented) deep link. If it works, Claude Desktop opens
-      //    the session. If not, nothing visible happens — and the clipboard
-      //    fallback below still gives the user a one-command resume.
+      // Undocumented pattern — try it; if Claude Desktop ignores, the CLI
+      // command in the clipboard is the fallback the user can paste.
       const deepLink = `claude://code/${sessionId}`;
       try { window.location.href = deepLink; } catch {}
 
-      // 2) Always also copy the CLI resume command as a safety net.
       const cmd = `claude --resume ${sessionId}`;
       try {
         await navigator.clipboard.writeText(cmd);
-        toast(`Tentative d'ouverture + commande copiée : ${cmd}`);
+        toast(`Ouverture tentée — commande copiée : ${cmd}`);
       } catch {
-        toast(`Commande de reprise : ${cmd}`);
+        toast(`Pour reprendre : ${cmd}`);
       }
     }
 

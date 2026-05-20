@@ -59,30 +59,16 @@ function parseLines(text, dropFirst) {
   return out;
 }
 
-function deriveStatus({ lastEvent, lastEventTime, mtimeMs, atimeMs }) {
+function deriveStatus({ lastEvent, lastEventTime, mtimeMs }) {
   const ref = Math.max(lastEventTime || 0, mtimeMs || 0);
   const age = Date.now() - ref;
   if (age > IDLE_MS) return 'idle';
-
-  const type = lastEvent?.type;
-  const stopReason = lastEvent?.message?.stop_reason;
-
   if (age < VERY_RECENT_MS) return 'working';
-
-  if (type === 'assistant' && stopReason === 'end_turn') {
-    // atime is updated when something reads the file after the assistant
-    // wrote (Claude Code opens it on resume, the dashboard does not). If the
-    // user opened the session in the UI, atime > mtime; otherwise unread.
-    const wasOpened = atimeMs && atimeMs > mtimeMs + 1000;
-    return wasOpened ? 'read' : 'unread';
-  }
-  if (type === 'assistant' && stopReason === 'tool_use') {
-    return age > NEEDS_ACTION_MS ? 'needs_action' : 'working';
-  }
-  if (type === 'user') {
-    return age < NEEDS_ACTION_MS ? 'working' : 'needs_action';
-  }
-  return 'idle';
+  // Anything else: Claude wrote something and stopped. From the JSONL alone
+  // we can't reliably tell "finished cleanly" from "stopped mid-flow", so we
+  // collapse both into "awaiting" and let the dashboard decide read/unread
+  // by tracking the user's last interaction with each session.
+  return 'awaiting';
 }
 
 async function scanFile(filePath) {
@@ -121,7 +107,6 @@ async function scanFile(filePath) {
     lastEvent,
     lastEventTime,
     mtimeMs: st.mtimeMs,
-    atimeMs: st.atimeMs,
   });
 
   return {
@@ -176,7 +161,7 @@ async function fullScan() {
 }
 
 function snapshot() {
-  const order = { needs_action: 0, working: 1, unread: 2, read: 3, idle: 4 };
+  const order = { working: 0, awaiting: 1, idle: 2 };
   return Array.from(sessions.values()).sort((a, b) => {
     const oa = order[a.status] ?? 99, ob = order[b.status] ?? 99;
     if (oa !== ob) return oa - ob;
