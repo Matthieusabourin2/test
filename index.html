@@ -73,8 +73,7 @@
       border-radius: var(--radius);
       padding: 14px 16px;
     }
-    .task h3 { margin: 0 0 4px; font-size: 1.05rem; }
-    .task .desc { color: var(--muted); font-size: 0.9rem; margin: 0 0 10px; }
+    .task h3 { margin: 0 0 6px; font-size: 1.05rem; }
     .task .meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 10px; display: flex; gap: 12px; flex-wrap: wrap; }
     .task .meta code { background: var(--panel-2); padding: 1px 6px; border-radius: 4px; }
     .task-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -114,8 +113,6 @@
       font-size: 0.95rem;
     }
     textarea { min-height: 140px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
-    .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    @media (max-width: 520px) { .field-row { grid-template-columns: 1fr; } }
     .hint { font-size: 0.8rem; color: var(--muted); }
     .warn { color: var(--danger); }
 
@@ -138,7 +135,7 @@
     <header>
       <div>
         <h1>Claude Tasks Dashboard</h1>
-        <div class="subtitle">Lance tes prompts récurrents dans Claude Desktop, Claude Code ou VS Code en un clic.</div>
+        <div class="subtitle">Lance tes prompts dans Claude Desktop (Chat / Cowork / Code) en un clic.</div>
       </div>
       <div class="toolbar">
         <button id="add-btn" class="primary">+ Nouvelle tâche</button>
@@ -158,29 +155,18 @@
         </div>
         <div class="modal-body">
           <div>
-            <label for="f-title">Titre</label>
+            <label for="f-title">Titre <span class="hint">(servira aussi de titre de conversation dans Claude)</span></label>
             <input type="text" id="f-title" required maxlength="120" placeholder="Ex: Revue de PR quotidienne" />
-          </div>
-          <div>
-            <label for="f-desc">Description <span class="hint">(optionnel)</span></label>
-            <input type="text" id="f-desc" maxlength="240" placeholder="Courte description affichée sous le titre" />
           </div>
           <div>
             <label for="f-prompt">Prompt</label>
             <textarea id="f-prompt" required placeholder="Le prompt qui sera pré-rempli dans Claude…"></textarea>
             <div class="hint" id="prompt-hint">0 caractères</div>
           </div>
-          <div class="field-row">
-            <div>
-              <label for="f-repo">Repo GitHub <span class="hint">(owner/name, optionnel)</span></label>
-              <input type="text" id="f-repo" placeholder="acme/payments" />
-            </div>
-            <div>
-              <label for="f-cwd">Chemin local <span class="hint">(absolu, optionnel)</span></label>
-              <input type="text" id="f-cwd" placeholder="/Users/moi/code/projet" />
-            </div>
+          <div>
+            <label for="f-folder">Dossier de travail <span class="hint">(optionnel — pour Cowork et Code)</span></label>
+            <input type="text" id="f-folder" placeholder="/Users/moi/code/projet" />
           </div>
-          <div class="hint">Si les deux sont fournis, <code>cwd</code> a la priorité pour Claude Code.</div>
         </div>
         <div class="modal-footer">
           <button type="button" id="delete-btn" class="danger" hidden>Supprimer</button>
@@ -195,17 +181,16 @@
   </div>
 
   <script>
-    const STORAGE_KEY = 'claude-dashboard:tasks:v1';
-    const LIMITS = { desktop: 14000, code: 5000 };
+    const STORAGE_KEY = 'claude-dashboard:tasks:v2';
+    const LEGACY_KEY = 'claude-dashboard:tasks:v1';
+    const PROMPT_LIMIT = 14000;
 
     const tasksEl = document.getElementById('tasks');
     const dialog = document.getElementById('editor');
     const editorTitle = document.getElementById('editor-title');
     const fTitle = document.getElementById('f-title');
-    const fDesc = document.getElementById('f-desc');
     const fPrompt = document.getElementById('f-prompt');
-    const fRepo = document.getElementById('f-repo');
-    const fCwd = document.getElementById('f-cwd');
+    const fFolder = document.getElementById('f-folder');
     const promptHint = document.getElementById('prompt-hint');
     const deleteBtn = document.getElementById('delete-btn');
 
@@ -215,28 +200,54 @@
       return 't_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
     }
     function load() {
-      try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
-      catch { return []; }
+      try {
+        const v2 = localStorage.getItem(STORAGE_KEY);
+        if (v2) return JSON.parse(v2);
+        const v1raw = localStorage.getItem(LEGACY_KEY);
+        if (v1raw) {
+          const v1 = JSON.parse(v1raw);
+          const migrated = (Array.isArray(v1) ? v1 : []).map(t => ({
+            id: t.id || uid(),
+            title: t.title || '',
+            prompt: t.prompt || '',
+            folder: t.folder || t.cwd || '',
+          }));
+          save(migrated);
+          return migrated;
+        }
+        return [];
+      } catch { return []; }
     }
     function save(tasks) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
     }
 
-    function desktopUrl(prompt) {
-      return `claude://claude.ai/new?q=${encodeURIComponent(prompt)}`;
+    // Prefix the prompt with the title so Claude's auto-titler uses it as the
+    // conversation name in the sidebar history. Best-effort — Claude may still
+    // reformulate, but starting with the literal title maximizes the match.
+    function buildPrompt(task) {
+      const title = (task.title || '').trim();
+      const body = (task.prompt || '').trim();
+      if (!title) return body;
+      return `${title}\n\n${body}`;
     }
-    function buildCodeParams({ prompt, repo, cwd }) {
+
+    function chatUrl(task) {
       const p = new URLSearchParams();
-      if (cwd && cwd.trim()) p.set('cwd', cwd.trim());
-      else if (repo && repo.trim()) p.set('repo', repo.trim());
-      p.set('q', prompt);
-      return p.toString();
+      p.set('q', buildPrompt(task));
+      return `claude://claude.ai/new?${p.toString()}`;
     }
-    function claudeCodeUrl(task) {
-      return `claude-cli://open?${buildCodeParams(task)}`;
+    function coworkUrl(task) {
+      const p = new URLSearchParams();
+      p.set('q', buildPrompt(task));
+      if (task.folder && task.folder.trim()) p.set('folder', task.folder.trim());
+      return `claude://cowork/new?${p.toString()}`;
     }
-    function vscodeUrl(task) {
-      return `vscode://anthropic.claude-code/open?${buildCodeParams(task)}`;
+    function codeUrl(task) {
+      const p = new URLSearchParams();
+      p.set('q', buildPrompt(task));
+      if (task.folder && task.folder.trim()) p.set('folder', task.folder.trim());
+      return `claude://code/new?${p.toString()}`;
     }
 
     function render() {
@@ -250,37 +261,33 @@
         return;
       }
       for (const t of tasks) {
-        const card = document.createElement('div');
-        card.className = 'task';
-        const desktopOver = t.prompt.length > LIMITS.desktop;
-        const codeOver = t.prompt.length > LIMITS.code;
+        const fullLen = buildPrompt(t).length;
+        const over = fullLen > PROMPT_LIMIT;
 
         const meta = [];
-        if (t.repo) meta.push(`<code>${escapeHtml(t.repo)}</code>`);
-        if (t.cwd) meta.push(`<code>${escapeHtml(t.cwd)}</code>`);
-        meta.push(`<span class="badge">${t.prompt.length} car.</span>`);
+        if (t.folder) meta.push(`<code>${escapeHtml(t.folder)}</code>`);
+        meta.push(`<span class="badge">${fullLen} car.</span>`);
 
+        const card = document.createElement('div');
+        card.className = 'task';
         card.innerHTML = `
           <h3>${escapeHtml(t.title)}</h3>
-          ${t.desc ? `<p class="desc">${escapeHtml(t.desc)}</p>` : ''}
           <div class="meta">${meta.join('')}</div>
           <div class="task-actions">
-            <a class="btn" data-action="desktop" ${desktopOver ? 'aria-disabled="true" title="Prompt trop long pour Claude Desktop"' : ''}>Desktop</a>
-            <a class="btn" data-action="code" ${codeOver ? 'aria-disabled="true" title="Prompt trop long pour Claude Code"' : ''}>Claude Code</a>
-            <a class="btn" data-action="vscode" ${codeOver ? 'aria-disabled="true" title="Prompt trop long pour VS Code"' : ''}>VS Code</a>
-            <button data-action="copy" class="ghost" title="Copier le prompt">Copier</button>
+            <a class="btn" data-action="chat" ${over ? 'aria-disabled="true" title="Prompt trop long"' : ''}>Chat</a>
+            <a class="btn" data-action="cowork" ${over ? 'aria-disabled="true" title="Prompt trop long"' : ''}>Cowork</a>
+            <a class="btn" data-action="code" ${over ? 'aria-disabled="true" title="Prompt trop long"' : ''}>Code</a>
+            <button data-action="copy" class="ghost" title="Copier le prompt complet">Copier</button>
             <span class="sep"></span>
             <button data-action="edit" class="ghost">Éditer</button>
           </div>
         `;
-        const desktopBtn = card.querySelector('[data-action="desktop"]');
-        const codeBtn = card.querySelector('[data-action="code"]');
-        const vscodeBtn = card.querySelector('[data-action="vscode"]');
-        if (!desktopOver) desktopBtn.href = desktopUrl(t.prompt);
-        if (!codeOver) codeBtn.href = claudeCodeUrl(t);
-        if (!codeOver) vscodeBtn.href = vscodeUrl(t);
-
-        card.querySelector('[data-action="copy"]').addEventListener('click', () => copyPrompt(t.prompt));
+        if (!over) {
+          card.querySelector('[data-action="chat"]').href = chatUrl(t);
+          card.querySelector('[data-action="cowork"]').href = coworkUrl(t);
+          card.querySelector('[data-action="code"]').href = codeUrl(t);
+        }
+        card.querySelector('[data-action="copy"]').addEventListener('click', () => copyPrompt(buildPrompt(t)));
         card.querySelector('[data-action="edit"]').addEventListener('click', () => openEditor(t.id));
 
         tasksEl.appendChild(card);
@@ -300,18 +307,14 @@
         if (!t) return;
         editorTitle.textContent = 'Modifier la tâche';
         fTitle.value = t.title;
-        fDesc.value = t.desc || '';
         fPrompt.value = t.prompt;
-        fRepo.value = t.repo || '';
-        fCwd.value = t.cwd || '';
+        fFolder.value = t.folder || '';
         deleteBtn.hidden = false;
       } else {
         editorTitle.textContent = 'Nouvelle tâche';
         fTitle.value = '';
-        fDesc.value = '';
         fPrompt.value = '';
-        fRepo.value = '';
-        fCwd.value = '';
+        fFolder.value = '';
         deleteBtn.hidden = true;
       }
       updatePromptHint();
@@ -320,18 +323,17 @@
     }
 
     function updatePromptHint() {
-      const len = fPrompt.value.length;
-      let msg = `${len} caractères`;
-      const warns = [];
-      if (len > LIMITS.code) warns.push(`au-delà de la limite Claude Code (${LIMITS.code})`);
-      if (len > LIMITS.desktop) warns.push(`au-delà de la limite Claude Desktop (${LIMITS.desktop})`);
-      if (warns.length) {
-        promptHint.innerHTML = `${len} caractères — <span class="warn">${warns.join(', ')}</span>`;
+      const title = fTitle.value.trim();
+      const body = fPrompt.value.trim();
+      const full = title ? `${title}\n\n${body}`.length : body.length;
+      if (full > PROMPT_LIMIT) {
+        promptHint.innerHTML = `${full} caractères (titre + prompt) — <span class="warn">au-delà de la limite Claude Desktop (${PROMPT_LIMIT})</span>`;
       } else {
-        promptHint.textContent = msg;
+        promptHint.textContent = `${full} caractères (titre + prompt)`;
       }
     }
     fPrompt.addEventListener('input', updatePromptHint);
+    fTitle.addEventListener('input', updatePromptHint);
 
     function saveFromForm() {
       const title = fTitle.value.trim();
@@ -341,10 +343,8 @@
       const tasks = load();
       const data = {
         title,
-        desc: fDesc.value.trim(),
         prompt,
-        repo: fRepo.value.trim(),
-        cwd: fCwd.value.trim(),
+        folder: fFolder.value.trim(),
       };
       if (editingId) {
         const i = tasks.findIndex(t => t.id === editingId);
@@ -396,10 +396,8 @@
             .map(t => ({
               id: t.id || uid(),
               title: t.title,
-              desc: t.desc || '',
               prompt: t.prompt,
-              repo: t.repo || '',
-              cwd: t.cwd || '',
+              folder: t.folder || t.cwd || '',
             }));
           if (cleaned.length === 0) throw new Error('Aucune tâche valide');
           const merge = confirm(`${cleaned.length} tâche(s) trouvée(s). OK = ajouter aux existantes, Annuler = remplacer tout.`);
@@ -439,11 +437,9 @@
       save([
         {
           id: uid(),
-          title: 'Exemple : revue rapide du repo',
-          desc: 'Demande un résumé de l\'état du repo et des priorités du jour.',
+          title: 'Revue rapide du repo',
           prompt: 'Fais un état des lieux rapide du repo : branche actuelle, fichiers modifiés non commités, derniers commits, et propose 3 priorités pour aujourd\'hui.',
-          repo: '',
-          cwd: '',
+          folder: '',
         },
       ]);
     }
