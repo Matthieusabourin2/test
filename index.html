@@ -155,7 +155,7 @@
         </div>
         <div class="modal-body">
           <div>
-            <label for="f-title">Titre <span class="hint">(servira aussi de titre de conversation dans Claude)</span></label>
+            <label for="f-title">Titre <span class="hint">(repris en H1 dans le prompt + signal renforcé pour l'auto-titreur Claude)</span></label>
             <input type="text" id="f-title" required maxlength="120" placeholder="Ex: Revue de PR quotidienne" />
           </div>
           <div>
@@ -222,14 +222,18 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
     }
 
-    // Prefix the prompt with the title so Claude's auto-titler uses it as the
-    // conversation name in the sidebar history. Best-effort — Claude may still
-    // reformulate, but starting with the literal title maximizes the match.
+    // Maximize the chance Claude's auto-titler picks up the exact task title:
+    // 1) Open with "# <TITLE>" — markdown H1 is the strongest topic signal.
+    // 2) Ask Claude to echo the title as a "## <TITLE>" header in its reply.
+    //    The auto-titler then sees the title in both the user message AND the
+    //    assistant reply — much harder to ignore than a single mention.
     function buildPrompt(task) {
       const title = (task.title || '').trim();
       const body = (task.prompt || '').trim();
       if (!title) return body;
-      return `${title}\n\n${body}`;
+      const titleEsc = title.replace(/"/g, '\\"');
+      const footer = `\n\n---\n_Pour mon historique : commence ta réponse par exactement la ligne \`## ${titleEsc}\` (sans rien d'autre sur cette ligne), puis saute une ligne et réponds normalement._`;
+      return `# ${title}\n\n${body}${footer}`;
     }
 
     function chatUrl(task) {
@@ -323,13 +327,11 @@
     }
 
     function updatePromptHint() {
-      const title = fTitle.value.trim();
-      const body = fPrompt.value.trim();
-      const full = title ? `${title}\n\n${body}`.length : body.length;
+      const full = buildPrompt({ title: fTitle.value, prompt: fPrompt.value }).length;
       if (full > PROMPT_LIMIT) {
-        promptHint.innerHTML = `${full} caractères (titre + prompt) — <span class="warn">au-delà de la limite Claude Desktop (${PROMPT_LIMIT})</span>`;
+        promptHint.innerHTML = `${full} caractères envoyés à Claude — <span class="warn">au-delà de la limite Claude Desktop (${PROMPT_LIMIT})</span>`;
       } else {
-        promptHint.textContent = `${full} caractères (titre + prompt)`;
+        promptHint.textContent = `${full} caractères envoyés à Claude (titre + prompt + instruction de titrage)`;
       }
     }
     fPrompt.addEventListener('input', updatePromptHint);
