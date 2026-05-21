@@ -16,6 +16,10 @@
       --accent-2: #7aa2f7;
       --danger: #e06c75;
       --ok: #98c379;
+      --working: #2563eb;
+      --needs-action: #b45309;
+      --ready: #16a34a;
+      --idle: #6b7280;
       --radius: 10px;
     }
     @media (prefers-color-scheme: light) {
@@ -30,6 +34,10 @@
         --accent-2: #2563eb;
         --danger: #b91c1c;
         --ok: #15803d;
+        --working: #2563eb;
+        --needs-action: #b45309;
+        --ready: #16a34a;
+        --idle: #9ca3af;
       }
     }
     * { box-sizing: border-box; }
@@ -38,20 +46,20 @@
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
       background: var(--bg);
       color: var(--text);
-      line-height: 1.5;
+      line-height: 1.45;
     }
-    .container { max-width: 980px; margin: 0 auto; padding: 24px 16px 80px; }
-    header { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 24px; }
-    h1 { margin: 0; font-size: 1.5rem; }
-    .subtitle { color: var(--muted); font-size: 0.9rem; }
+    .container { max-width: 1400px; margin: 0 auto; padding: 20px 16px 80px; }
+    header { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+    h1 { margin: 0; font-size: 1.4rem; }
+    .subtitle { color: var(--muted); font-size: 0.85rem; }
     .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
     button, .btn {
       background: var(--panel-2);
       color: var(--text);
       border: 1px solid var(--border);
-      padding: 8px 12px;
+      padding: 6px 10px;
       border-radius: var(--radius);
-      font-size: 0.9rem;
+      font-size: 0.85rem;
       cursor: pointer;
       text-decoration: none;
       display: inline-flex;
@@ -66,27 +74,143 @@
     button.ghost { background: transparent; }
     .btn[aria-disabled="true"] { opacity: 0.45; pointer-events: none; }
 
-    .tasks { display: grid; gap: 12px; }
+    .setup-banner {
+      background: rgba(180,83,9,0.12);
+      border: 1px solid var(--needs-action);
+      color: var(--text);
+      padding: 12px 14px;
+      border-radius: var(--radius);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .setup-banner strong { color: var(--needs-action); }
+    .setup-banner .grow { flex: 1; }
+
+    /* Kanban */
+    .kanban {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+    .col {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px;
+      min-height: 200px;
+      display: flex;
+      flex-direction: column;
+    }
+    .col h2 {
+      margin: 0 0 8px;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .col h2 .count {
+      background: var(--panel-2);
+      padding: 1px 7px;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      color: var(--muted);
+    }
+    .col-body { display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 80px; }
+    .col-body.drop-target { background: rgba(122,162,247,0.08); border-radius: 6px; }
+
     .task {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: grab;
+      transition: border-color 0.1s, transform 0.1s;
+    }
+    .task:active { cursor: grabbing; }
+    .task.dragging { opacity: 0.4; }
+    .task h3 { margin: 0 0 4px; font-size: 0.9rem; font-weight: 600; }
+    .task .meta { font-size: 0.7rem; color: var(--muted); margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .task .meta code { background: var(--panel); padding: 0 4px; border-radius: 3px; font-size: 0.95em; }
+    .task .meta .badge { background: var(--panel); border: 1px solid var(--border); padding: 0 6px; border-radius: 999px; }
+    .task-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+    .task-actions .btn { padding: 3px 7px; font-size: 0.72rem; }
+    .task-link {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 5px;
+      padding: 4px 6px;
+      background: var(--panel);
+      border-radius: 5px;
+      font-size: 0.7rem;
+      cursor: pointer;
+    }
+    .task-link:hover { background: var(--bg); }
+    .task-link .dot { width: 8px; height: 8px; }
+    .task-link .label { flex: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .task-link .unlink { color: var(--muted); cursor: pointer; padding: 0 4px; }
+
+    /* Sessions panel */
+    .sessions-panel {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 14px 16px;
     }
-    .task h3 { margin: 0 0 6px; font-size: 1.05rem; }
-    .task .meta { font-size: 0.8rem; color: var(--muted); margin-bottom: 10px; display: flex; gap: 12px; flex-wrap: wrap; }
-    .task .meta code { background: var(--panel-2); padding: 1px 6px; border-radius: 4px; }
-    .task-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .task-actions .sep { flex: 1; }
-
-    .empty {
-      text-align: center;
-      padding: 40px 16px;
+    .sessions-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+    .sessions-header h2 { margin: 0; font-size: 1rem; }
+    .sessions-header .count { color: var(--muted); font-size: 0.78rem; }
+    .status-tabs { display: flex; gap: 6px; margin-bottom: 10px; font-size: 0.8rem; flex-wrap: wrap; }
+    .status-tab { padding: 3px 9px; border-radius: 999px; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--text); font-size: 0.78rem; }
+    .status-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .sessions-list { display: flex; flex-direction: column; gap: 1px; }
+    .session {
+      display: grid;
+      grid-template-columns: 16px 1fr auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 7px 8px;
+      border-radius: 5px;
+      font-size: 0.86rem;
+      cursor: pointer;
+      user-select: none;
+    }
+    .session:hover { background: var(--panel-2); }
+    .dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; justify-self: center; }
+    .dot.working      { background: var(--working); animation: pulse 1.4s infinite; }
+    .dot.needs_action { background: var(--needs-action); animation: pulse 1.4s infinite; }
+    .dot.ready        { background: var(--ready); }
+    .dot.idle         { background: var(--idle); opacity: 0.5; }
+    .dot.finished     { background: var(--idle); opacity: 0.3; }
+    .dot.unknown      { background: transparent; border: 1px dashed var(--muted); }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+    .session.idle, .session.finished { opacity: 0.55; }
+    .session-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .session-when  { color: var(--muted); font-size: 0.74rem; white-space: nowrap; }
+    .session-link-btn { padding: 2px 6px; font-size: 0.7rem; opacity: 0; }
+    .session:hover .session-link-btn { opacity: 1; }
+    .session-project {
+      display: inline-block;
       color: var(--muted);
-      border: 1px dashed var(--border);
-      border-radius: var(--radius);
+      font-size: 0.72rem;
+      margin-left: 6px;
+      padding: 1px 5px;
+      background: var(--panel-2);
+      border-radius: 3px;
+    }
+    .session.linked .session-title::before {
+      content: "📌 ";
+      font-size: 0.85em;
     }
 
+    /* Modal */
     dialog {
       background: var(--panel);
       color: var(--text);
@@ -97,79 +221,33 @@
       width: 92%;
     }
     dialog::backdrop { background: rgba(0,0,0,0.5); }
-    .modal-header, .modal-footer { padding: 14px 16px; }
+    .modal-header, .modal-footer { padding: 12px 14px; }
     .modal-header { border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-    .modal-body { padding: 16px; display: grid; gap: 12px; }
+    .modal-body { padding: 14px; display: grid; gap: 12px; }
     .modal-footer { border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 8px; }
-    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
+    label { display: block; font-size: 0.82rem; color: var(--muted); margin-bottom: 4px; }
     input[type="text"], textarea {
       width: 100%;
       background: var(--panel-2);
       color: var(--text);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 8px 10px;
+      padding: 7px 9px;
       font-family: inherit;
-      font-size: 0.95rem;
+      font-size: 0.92rem;
     }
-    textarea { min-height: 140px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; }
-    .hint { font-size: 0.8rem; color: var(--muted); }
+    textarea { min-height: 130px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
+    .hint { font-size: 0.76rem; color: var(--muted); }
     .warn { color: var(--danger); }
 
     .toast {
-      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-      background: var(--panel-2); border: 1px solid var(--border); padding: 10px 14px;
-      border-radius: var(--radius); font-size: 0.9rem; opacity: 0; transition: opacity 0.2s;
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      background: var(--panel-2); border: 1px solid var(--border); padding: 9px 13px;
+      border-radius: var(--radius); font-size: 0.85rem; opacity: 0; transition: opacity 0.2s;
       pointer-events: none;
+      max-width: 80%;
     }
     .toast.show { opacity: 1; }
-
-    .badge {
-      font-size: 0.75rem; padding: 2px 8px; border-radius: 999px;
-      background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
-    }
-
-    /* sessions panel */
-    .sessions-panel { margin-top: 32px; }
-    .sessions-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }
-    .sessions-header h2 { margin: 0; font-size: 1.05rem; }
-    .sessions-header .count { color: var(--muted); font-size: 0.8rem; }
-    .sessions-list { display: flex; flex-direction: column; gap: 2px; }
-    .session {
-      display: grid;
-      grid-template-columns: 18px 1fr auto;
-      gap: 12px;
-      align-items: center;
-      padding: 8px 10px;
-      border-radius: 6px;
-      font-size: 0.92rem;
-    }
-    .session:hover { background: var(--panel-2); }
-    .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; justify-self: center; }
-    .dot.working { background: #2563eb; animation: pulse 1.4s infinite; }
-    .dot.unread  { background: #16a34a; animation: pulse 1.4s infinite; }
-    .dot.read    { background: #16a34a; }
-    .dot.idle    { background: #9ca3af; opacity: 0.5; }
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
-
-    .session.idle { opacity: 0.55; }
-    .session { cursor: pointer; user-select: none; }
-    .session-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .type-badge {
-      font-size: 0.65rem; padding: 1px 5px; border-radius: 3px; margin-right: 6px;
-      font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;
-      vertical-align: middle;
-    }
-    .type-badge.code   { background: rgba(37,99,235,0.15);   color: #2563eb; }
-    .type-badge.cowork { background: rgba(168,85,247,0.15);  color: #9333ea; }
-    .type-badge.chat   { background: rgba(234,88,12,0.15);   color: #ea580c; }
-    .session-when  { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
-    .session-project { color: var(--muted); font-size: 0.78rem; margin-left: 8px; }
-
-    .status-tabs { display: flex; gap: 8px; margin-bottom: 12px; font-size: 0.85rem; }
-    .status-tab { padding: 4px 10px; border-radius: 999px; cursor: pointer; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
-    .status-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-    .status-tab .num { opacity: 0.7; margin-left: 4px; }
 
     .sidecar-banner {
       background: var(--panel-2); border: 1px dashed var(--border);
@@ -177,6 +255,21 @@
       color: var(--muted); font-size: 0.85rem;
     }
     .sidecar-banner code { background: var(--panel); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; }
+
+    /* Link picker dialog */
+    .link-picker-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+    .link-picker-item {
+      padding: 7px 9px; border-radius: 6px; cursor: pointer;
+      display: grid; grid-template-columns: 16px 1fr auto; gap: 10px; align-items: center;
+    }
+    .link-picker-item:hover { background: var(--panel-2); }
+
+    @media (max-width: 1100px) {
+      .kanban { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 700px) {
+      .kanban { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -184,7 +277,7 @@
     <header>
       <div>
         <h1>Claude Tasks Dashboard</h1>
-        <div class="subtitle">Lance tes prompts dans Claude Desktop (Chat / Cowork / Code) en un clic.</div>
+        <div class="subtitle">Local-only. Statuts en temps réel depuis les hooks Claude Code. Ouvre dans Claude Desktop via accessibilité.</div>
       </div>
       <div class="toolbar">
         <button id="add-btn" class="primary">+ Nouvelle tâche</button>
@@ -194,17 +287,19 @@
       </div>
     </header>
 
-    <div id="tasks" class="tasks"></div>
+    <div id="setup-banner" style="display:none"></div>
+
+    <div id="kanban" class="kanban"></div>
 
     <section class="sessions-panel">
       <div class="sessions-header">
-        <h2>Sessions récentes</h2>
-        <span class="count" id="sessions-count"></span>
+        <h2>Sessions Claude Code <span class="count" id="sessions-count"></span></h2>
       </div>
       <div class="status-tabs" id="status-tabs"></div>
       <div id="sessions-list" class="sessions-list"></div>
     </section>
 
+    <!-- task editor -->
     <dialog id="editor">
       <form method="dialog">
         <div class="modal-header">
@@ -213,7 +308,7 @@
         </div>
         <div class="modal-body">
           <div>
-            <label for="f-title">Titre <span class="hint">(repris en H1 dans le prompt + signal renforcé pour l'auto-titreur Claude)</span></label>
+            <label for="f-title">Titre <span class="hint">(repris en H1 dans le prompt)</span></label>
             <input type="text" id="f-title" required maxlength="120" placeholder="Ex: Revue de PR quotidienne" />
           </div>
           <div>
@@ -222,7 +317,7 @@
             <div class="hint" id="prompt-hint">0 caractères</div>
           </div>
           <div>
-            <label for="f-folder">Dossier de travail <span class="hint">(optionnel — pour Cowork et Code)</span></label>
+            <label for="f-folder">Dossier de travail <span class="hint">(optionnel)</span></label>
             <input type="text" id="f-folder" placeholder="/Users/moi/code/projet" />
           </div>
         </div>
@@ -235,15 +330,48 @@
       </form>
     </dialog>
 
+    <!-- link picker -->
+    <dialog id="link-picker">
+      <form method="dialog">
+        <div class="modal-header">
+          <strong>Lier une session Claude Code</strong>
+          <button type="button" id="link-picker-close" class="ghost" aria-label="Fermer">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="hint">Choisis la session à associer à cette tâche. Tu pourras la rouvrir en un clic depuis la carte.</div>
+          <div id="link-picker-list" class="link-picker-list"></div>
+        </div>
+      </form>
+    </dialog>
+
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </div>
 
   <script>
-    const STORAGE_KEY = 'claude-dashboard:tasks:v2';
-    const LEGACY_KEY = 'claude-dashboard:tasks:v1';
+    const STORAGE_KEY = 'claude-dashboard:tasks:v3';
+    const LEGACY_KEY_V2 = 'claude-dashboard:tasks:v2';
+    const LEGACY_KEY_V1 = 'claude-dashboard:tasks:v1';
     const PROMPT_LIMIT = 14000;
 
-    const tasksEl = document.getElementById('tasks');
+    const COLUMNS = [
+      { id: 'todo',    label: 'À faire' },
+      { id: 'doing',   label: 'En cours' },
+      { id: 'review',  label: 'À valider' },
+      { id: 'blocked', label: 'Bloqué' },
+      { id: 'done',    label: 'Terminé' },
+    ];
+    const COLUMN_IDS = COLUMNS.map(c => c.id);
+
+    const STATUS_LABEL = {
+      working:      'travaille',
+      needs_action: 'action attendue',
+      ready:        'prêt',
+      idle:         'inactif',
+      finished:     'terminé',
+      unknown:      'inconnu',
+    };
+
+    const kanbanEl = document.getElementById('kanban');
     const dialog = document.getElementById('editor');
     const editorTitle = document.getElementById('editor-title');
     const fTitle = document.getElementById('f-title');
@@ -251,27 +379,49 @@
     const fFolder = document.getElementById('f-folder');
     const promptHint = document.getElementById('prompt-hint');
     const deleteBtn = document.getElementById('delete-btn');
+    const linkPicker = document.getElementById('link-picker');
+    const linkPickerList = document.getElementById('link-picker-list');
+    const setupBanner = document.getElementById('setup-banner');
 
     let editingId = null;
+    let linkingTaskId = null;
+
+    // ----- task storage -----
 
     function uid() {
       return 't_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
     }
     function load() {
       try {
-        const v2 = localStorage.getItem(STORAGE_KEY);
-        if (v2) return JSON.parse(v2);
-        const v1raw = localStorage.getItem(LEGACY_KEY);
+        const v3 = localStorage.getItem(STORAGE_KEY);
+        if (v3) return JSON.parse(v3);
+        // migrate from v2 / v1
+        const v2 = localStorage.getItem(LEGACY_KEY_V2);
+        if (v2) {
+          const tasks = (JSON.parse(v2) || []).map(t => ({
+            id: t.id || uid(),
+            title: t.title || '',
+            prompt: t.prompt || '',
+            folder: t.folder || '',
+            status: 'todo',
+            linkedSessionId: null,
+          }));
+          save(tasks);
+          return tasks;
+        }
+        const v1raw = localStorage.getItem(LEGACY_KEY_V1);
         if (v1raw) {
           const v1 = JSON.parse(v1raw);
-          const migrated = (Array.isArray(v1) ? v1 : []).map(t => ({
+          const tasks = (Array.isArray(v1) ? v1 : []).map(t => ({
             id: t.id || uid(),
             title: t.title || '',
             prompt: t.prompt || '',
             folder: t.folder || t.cwd || '',
+            status: 'todo',
+            linkedSessionId: null,
           }));
-          save(migrated);
-          return migrated;
+          save(tasks);
+          return tasks;
         }
         return [];
       } catch { return []; }
@@ -280,11 +430,8 @@
       localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
     }
 
-    // Maximize the chance Claude's auto-titler picks up the exact task title:
-    // 1) Open with "# <TITLE>" — markdown H1 is the strongest topic signal.
-    // 2) Ask Claude to echo the title as a "## <TITLE>" header in its reply.
-    //    The auto-titler then sees the title in both the user message AND the
-    //    assistant reply — much harder to ignore than a single mention.
+    // ----- prompt building (same as before) -----
+
     function buildPrompt(task) {
       const title = (task.title || '').trim();
       const body = (task.prompt || '').trim();
@@ -312,55 +459,143 @@
       return `claude://code/new?${p.toString()}`;
     }
 
-    function render() {
-      const tasks = load();
-      tasksEl.innerHTML = '';
-      if (tasks.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'empty';
-        empty.innerHTML = `Aucune tâche pour le moment. Clique sur <strong>+ Nouvelle tâche</strong> pour commencer.`;
-        tasksEl.appendChild(empty);
-        return;
-      }
-      for (const t of tasks) {
-        const fullLen = buildPrompt(t).length;
-        const over = fullLen > PROMPT_LIMIT;
-
-        const meta = [];
-        if (t.folder) meta.push(`<code>${escapeHtml(t.folder)}</code>`);
-        meta.push(`<span class="badge">${fullLen} car.</span>`);
-
-        const card = document.createElement('div');
-        card.className = 'task';
-        card.innerHTML = `
-          <h3>${escapeHtml(t.title)}</h3>
-          <div class="meta">${meta.join('')}</div>
-          <div class="task-actions">
-            <a class="btn" data-action="chat" ${over ? 'aria-disabled="true" title="Prompt trop long"' : ''}>Chat</a>
-            <a class="btn" data-action="cowork" ${over ? 'aria-disabled="true" title="Prompt trop long"' : ''}>Cowork</a>
-            <a class="btn" data-action="code" ${over ? 'aria-disabled="true" title="Prompt trop long"' : ''}>Code</a>
-            <button data-action="copy" class="ghost" title="Copier le prompt complet">Copier</button>
-            <span class="sep"></span>
-            <button data-action="edit" class="ghost">Éditer</button>
-          </div>
-        `;
-        if (!over) {
-          card.querySelector('[data-action="chat"]').href = chatUrl(t);
-          card.querySelector('[data-action="cowork"]').href = coworkUrl(t);
-          card.querySelector('[data-action="code"]').href = codeUrl(t);
-        }
-        card.querySelector('[data-action="copy"]').addEventListener('click', () => copyPrompt(buildPrompt(t)));
-        card.querySelector('[data-action="edit"]').addEventListener('click', () => openEditor(t.id));
-
-        tasksEl.appendChild(card);
-      }
-    }
-
     function escapeHtml(s) {
       return String(s).replace(/[&<>"']/g, c => ({
         '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
       }[c]));
     }
+
+    // ----- kanban render -----
+
+    function render() {
+      const tasks = load();
+      kanbanEl.innerHTML = '';
+      const byStatus = Object.fromEntries(COLUMN_IDS.map(id => [id, []]));
+      for (const t of tasks) {
+        const s = COLUMN_IDS.includes(t.status) ? t.status : 'todo';
+        byStatus[s].push(t);
+      }
+
+      for (const col of COLUMNS) {
+        const colEl = document.createElement('div');
+        colEl.className = 'col';
+        colEl.dataset.colId = col.id;
+        colEl.innerHTML = `
+          <h2>${escapeHtml(col.label)} <span class="count">${byStatus[col.id].length}</span></h2>
+          <div class="col-body" data-col-id="${col.id}"></div>
+        `;
+        kanbanEl.appendChild(colEl);
+
+        const bodyEl = colEl.querySelector('.col-body');
+
+        for (const t of byStatus[col.id]) {
+          bodyEl.appendChild(renderTaskCard(t));
+        }
+
+        // drop zone wiring
+        bodyEl.addEventListener('dragover', e => { e.preventDefault(); bodyEl.classList.add('drop-target'); });
+        bodyEl.addEventListener('dragleave', () => bodyEl.classList.remove('drop-target'));
+        bodyEl.addEventListener('drop', e => {
+          e.preventDefault();
+          bodyEl.classList.remove('drop-target');
+          const taskId = e.dataTransfer.getData('text/task-id');
+          if (!taskId) return;
+          moveTask(taskId, col.id);
+        });
+      }
+    }
+
+    function renderTaskCard(t) {
+      const fullLen = buildPrompt(t).length;
+      const over = fullLen > PROMPT_LIMIT;
+      const linked = t.linkedSessionId ? liveSessions.find(s => s.sessionId === t.linkedSessionId) : null;
+
+      const card = document.createElement('div');
+      card.className = 'task';
+      card.draggable = true;
+      card.dataset.taskId = t.id;
+
+      const folderBadge = t.folder
+        ? `<code title="${escapeHtml(t.folder)}">${escapeHtml(t.folder.length > 22 ? '…' + t.folder.slice(-21) : t.folder)}</code>` : '';
+
+      card.innerHTML = `
+        <h3>${escapeHtml(t.title)}</h3>
+        <div class="meta">
+          ${folderBadge}
+          <span class="badge">${fullLen}c</span>
+        </div>
+        <div class="task-actions">
+          <a class="btn" data-action="chat" ${over ? 'aria-disabled="true"' : ''}>Chat</a>
+          <a class="btn" data-action="cowork" ${over ? 'aria-disabled="true"' : ''}>Cowork</a>
+          <a class="btn" data-action="code" ${over ? 'aria-disabled="true"' : ''}>Code</a>
+          <button data-action="link" class="ghost" title="Lier à une session existante">🔗</button>
+          <button data-action="edit" class="ghost">✏️</button>
+        </div>
+        ${linked ? `
+          <div class="task-link" data-action="open-linked" title="Ouvrir dans Claude Desktop">
+            <span class="dot ${linked.status}"></span>
+            <span class="label">${escapeHtml(linked.title || linked.sessionId.slice(0,8) + '…')}</span>
+            <span class="unlink" data-action="unlink" title="Délier">✕</span>
+          </div>` : ''}
+      `;
+
+      if (!over) {
+        card.querySelector('[data-action="chat"]').href = chatUrl(t);
+        card.querySelector('[data-action="cowork"]').href = coworkUrl(t);
+        card.querySelector('[data-action="code"]').href = codeUrl(t);
+      }
+      card.querySelector('[data-action="link"]').addEventListener('click', e => {
+        e.stopPropagation();
+        openLinkPicker(t.id);
+      });
+      card.querySelector('[data-action="edit"]').addEventListener('click', e => {
+        e.stopPropagation();
+        openEditor(t.id);
+      });
+
+      const linkedEl = card.querySelector('[data-action="open-linked"]');
+      if (linkedEl) {
+        linkedEl.addEventListener('click', e => {
+          if (e.target.dataset.action === 'unlink') return;
+          openInDesktop(linked.title);
+        });
+        const unlinkEl = card.querySelector('[data-action="unlink"]');
+        unlinkEl.addEventListener('click', e => {
+          e.stopPropagation();
+          updateTask(t.id, { linkedSessionId: null });
+        });
+      }
+
+      card.addEventListener('dragstart', e => {
+        card.classList.add('dragging');
+        e.dataTransfer.setData('text/task-id', t.id);
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      card.addEventListener('dragend', () => card.classList.remove('dragging'));
+
+      return card;
+    }
+
+    function moveTask(taskId, newStatus) {
+      const tasks = load();
+      const i = tasks.findIndex(t => t.id === taskId);
+      if (i < 0) return;
+      if (tasks[i].status === newStatus) return;
+      tasks[i].status = newStatus;
+      save(tasks);
+      render();
+    }
+
+    function updateTask(taskId, patch) {
+      const tasks = load();
+      const i = tasks.findIndex(t => t.id === taskId);
+      if (i < 0) return;
+      tasks[i] = { ...tasks[i], ...patch };
+      save(tasks);
+      render();
+    }
+
+    // ----- editor -----
 
     function openEditor(id) {
       editingId = id || null;
@@ -387,9 +622,9 @@
     function updatePromptHint() {
       const full = buildPrompt({ title: fTitle.value, prompt: fPrompt.value }).length;
       if (full > PROMPT_LIMIT) {
-        promptHint.innerHTML = `${full} caractères envoyés à Claude — <span class="warn">au-delà de la limite Claude Desktop (${PROMPT_LIMIT})</span>`;
+        promptHint.innerHTML = `${full} caractères — <span class="warn">au-delà de la limite Claude Desktop (${PROMPT_LIMIT})</span>`;
       } else {
-        promptHint.textContent = `${full} caractères envoyés à Claude (titre + prompt + instruction de titrage)`;
+        promptHint.textContent = `${full} caractères envoyés à Claude`;
       }
     }
     fPrompt.addEventListener('input', updatePromptHint);
@@ -410,7 +645,7 @@
         const i = tasks.findIndex(t => t.id === editingId);
         if (i >= 0) tasks[i] = { ...tasks[i], ...data };
       } else {
-        tasks.push({ id: uid(), ...data });
+        tasks.push({ id: uid(), status: 'todo', linkedSessionId: null, ...data });
       }
       save(tasks);
       dialog.close();
@@ -427,14 +662,37 @@
       toast('Tâche supprimée');
     }
 
-    async function copyPrompt(text) {
-      try {
-        await navigator.clipboard.writeText(text);
-        toast('Prompt copié');
-      } catch {
-        toast('Impossible de copier');
+    // ----- link picker -----
+
+    function openLinkPicker(taskId) {
+      linkingTaskId = taskId;
+      if (!liveSessions.length) {
+        linkPickerList.innerHTML = `<div class="sidecar-banner">Aucune session Claude Code détectée. Démarre Claude Desktop ou lance une session Code, puis reviens ici.</div>`;
+      } else {
+        linkPickerList.innerHTML = liveSessions
+          .filter(s => s.status !== 'finished')
+          .map(s => `
+            <div class="link-picker-item" data-session-id="${escapeHtml(s.sessionId)}">
+              <span class="dot ${s.status}"></span>
+              <div>
+                <div>${escapeHtml(s.title || s.sessionId.slice(0,8) + '…')}</div>
+                <div class="hint">${escapeHtml(s.project || '')} · ${escapeHtml(STATUS_LABEL[s.status] || s.status)}</div>
+              </div>
+              <span class="session-when">${relTime(s.lastEventTime)}</span>
+            </div>
+          `).join('');
+        linkPickerList.querySelectorAll('.link-picker-item').forEach(el => {
+          el.addEventListener('click', () => {
+            updateTask(linkingTaskId, { linkedSessionId: el.dataset.sessionId });
+            linkPicker.close();
+            toast('Session liée');
+          });
+        });
       }
+      linkPicker.showModal();
     }
+
+    // ----- import/export -----
 
     function exportTasks() {
       const blob = new Blob([JSON.stringify(load(), null, 2)], { type: 'application/json' });
@@ -444,7 +702,6 @@
       a.click();
       URL.revokeObjectURL(a.href);
     }
-
     function importTasks(file) {
       const reader = new FileReader();
       reader.onload = () => {
@@ -458,9 +715,11 @@
               title: t.title,
               prompt: t.prompt,
               folder: t.folder || t.cwd || '',
+              status: COLUMN_IDS.includes(t.status) ? t.status : 'todo',
+              linkedSessionId: t.linkedSessionId || null,
             }));
           if (cleaned.length === 0) throw new Error('Aucune tâche valide');
-          const merge = confirm(`${cleaned.length} tâche(s) trouvée(s). OK = ajouter aux existantes, Annuler = remplacer tout.`);
+          const merge = confirm(`${cleaned.length} tâche(s) trouvée(s). OK = ajouter, Annuler = remplacer tout.`);
           const next = merge ? [...load(), ...cleaned] : cleaned;
           save(next);
           render();
@@ -472,13 +731,17 @@
       reader.readAsText(file);
     }
 
+    // ----- toast -----
+
     function toast(msg) {
       const el = document.getElementById('toast');
       el.textContent = msg;
       el.classList.add('show');
       clearTimeout(toast._t);
-      toast._t = setTimeout(() => el.classList.remove('show'), 1800);
+      toast._t = setTimeout(() => el.classList.remove('show'), 2200);
     }
+
+    // ----- event wiring -----
 
     document.getElementById('add-btn').addEventListener('click', () => openEditor(null));
     document.getElementById('export-btn').addEventListener('click', exportTasks);
@@ -492,48 +755,77 @@
     document.getElementById('cancel-btn').addEventListener('click', () => dialog.close());
     document.getElementById('close-btn').addEventListener('click', () => dialog.close());
     deleteBtn.addEventListener('click', deleteCurrent);
+    document.getElementById('link-picker-close').addEventListener('click', () => linkPicker.close());
 
+    // seed example for new users
     if (load().length === 0) {
-      save([
-        {
-          id: uid(),
-          title: 'Revue rapide du repo',
-          prompt: 'Fais un état des lieux rapide du repo : branche actuelle, fichiers modifiés non commités, derniers commits, et propose 3 priorités pour aujourd\'hui.',
-          folder: '',
-        },
-      ]);
+      save([{
+        id: uid(),
+        title: 'Revue rapide du repo',
+        prompt: 'Fais un état des lieux rapide du repo : branche actuelle, fichiers modifiés non commités, derniers commits, et propose 3 priorités pour aujourd\'hui.',
+        folder: '',
+        status: 'todo',
+        linkedSessionId: null,
+      }]);
     }
+
     render();
 
-    // ----- Sessions panel (sidecar-driven) -----
+    // ----- sidecar / sessions panel -----
+
     const SIDECAR_BASE = (location.port === '8765' || location.hostname === 'localhost')
       ? location.origin : 'http://localhost:8765';
     const sessionsListEl = document.getElementById('sessions-list');
     const sessionsCountEl = document.getElementById('sessions-count');
     let liveSessions = [];
     let sidecarAlive = false;
+    let hooksInstalled = false;
+    let currentFilter = 'active'; // 'active' = working+needs_action+ready / 'all'
 
-    const STATUS_LABEL = {
-      working: 'en cours',
-      unread:  'pas encore lu',
-      read:    'lu',
-      idle:    'inactive',
-    };
-    const FILTERS = ['actifs', 'tout'];
-    let currentFilter = 'actifs'; // 'actifs' hides idle; 'tout' shows everything
+    function renderSidecarMissing() {
+      sessionsCountEl.textContent = '';
+      sessionsListEl.innerHTML = `
+        <div class="sidecar-banner">
+          Sidecar local non détecté. Ouvre cette page depuis <code>http://localhost:8765/</code> après avoir lancé <code>node sidecar/index.js</code>.
+        </div>`;
+      setupBanner.style.display = 'none';
+    }
 
-    // Combine sidecar status + Desktop's viewedAt (if available) to determine
-    // the visual class. The sidecar tries to extract a real lastViewedAt from
-    // Claude Desktop's shared_proto_db; if that's available it's authoritative.
-    // If not, an awaiting session is treated as unread until further notice.
-    function visualStatus(s) {
-      if (s.status === 'working') return 'working';
-      if (s.status === 'idle')    return 'idle';
-      if (s.viewedAt && s.viewedAt >= s.lastEventTime) return 'read';
-      return 'unread';
+    function renderSetupBanner() {
+      if (!sidecarAlive || hooksInstalled) {
+        setupBanner.style.display = 'none';
+        return;
+      }
+      setupBanner.style.display = 'flex';
+      setupBanner.className = 'setup-banner';
+      setupBanner.innerHTML = `
+        <div class="grow">
+          <strong>Configuration une seule fois</strong> — pour avoir le statut temps réel des sessions (working / action attendue / prêt), il faut activer les hooks Claude Code.
+          On va écrire un petit script dans <code>~/.claude/dashboard/hook.py</code> et l'enregistrer dans <code>~/.claude/settings.json</code> (avec backup).
+        </div>
+        <button class="btn primary" id="install-hooks-btn">Installer les hooks</button>
+      `;
+      document.getElementById('install-hooks-btn').addEventListener('click', installHooks);
+    }
+
+    async function installHooks() {
+      try {
+        const r = await fetch(`${SIDECAR_BASE}/api/install-hooks`, { method: 'POST' });
+        const data = await r.json();
+        if (data.ok) {
+          hooksInstalled = true;
+          renderSetupBanner();
+          toast(`Hooks installés. Backup : ${data.backup || 'aucun (pas de settings.json préexistant)'}`);
+        } else {
+          toast('Échec installation : ' + (data.error || 'inconnue'));
+        }
+      } catch (e) {
+        toast('Erreur réseau : ' + e.message);
+      }
     }
 
     function relTime(ms) {
+      if (!ms) return '—';
       const s = Math.round((Date.now() - ms) / 1000);
       if (s < 30) return 'à l\'instant';
       if (s < 60) return `${s}s`;
@@ -544,75 +836,101 @@
       return `${Math.round(h / 24)}j`;
     }
 
-    function renderSidecarMissing() {
-      sessionsCountEl.textContent = '';
-      sessionsListEl.innerHTML = `
-        <div class="sidecar-banner">
-          Sidecar local non détecté. Ouvre cette page depuis <code>http://localhost:8765/</code> après avoir lancé <code>node sidecar/index.js</code>.
-        </div>`;
-    }
-
     function renderSessions() {
       if (!sidecarAlive) return;
+      renderSetupBanner();
+
+      const counts = {};
+      for (const s of liveSessions) counts[s.status] = (counts[s.status] || 0) + 1;
+
       const tabsEl = document.getElementById('status-tabs');
-
-      // counts by visual status
-      const counts = { working: 0, unread: 0, read: 0, idle: 0 };
-      const enriched = liveSessions.map(s => {
-        const v = visualStatus(s);
-        counts[v] = (counts[v] || 0) + 1;
-        return { s, v };
-      });
-
-      tabsEl.innerHTML = FILTERS.map(f => {
-        const label = f === 'actifs'
-          ? `Actifs <span class="num">${counts.working + counts.unread + counts.read}</span>`
-          : `Tout <span class="num">${liveSessions.length}</span>`;
-        return `<button class="status-tab ${f === currentFilter ? 'active' : ''}" data-filter="${f}">${label}</button>`;
-      }).join('');
+      const activeCount = (counts.working || 0) + (counts.needs_action || 0) + (counts.ready || 0);
+      tabsEl.innerHTML = `
+        <button class="status-tab ${currentFilter === 'active' ? 'active' : ''}" data-filter="active">
+          Actifs · ${activeCount}
+        </button>
+        <button class="status-tab ${currentFilter === 'all' ? 'active' : ''}" data-filter="all">
+          Tout · ${liveSessions.length}
+        </button>
+      `;
       tabsEl.querySelectorAll('.status-tab').forEach(b => {
         b.addEventListener('click', () => { currentFilter = b.dataset.filter; renderSessions(); });
       });
 
-      sessionsCountEl.textContent =
-        `${counts.working} en cours • ${counts.unread} non lus • ${counts.read} lus • ${counts.idle} inactives`;
+      const parts = [];
+      for (const st of ['working','needs_action','ready','idle','unknown','finished']) {
+        if (counts[st]) parts.push(`${counts[st]} ${STATUS_LABEL[st]}`);
+      }
+      sessionsCountEl.textContent = parts.join(' · ');
 
-      const visible = enriched.filter(({ v }) => currentFilter === 'tout' || v !== 'idle');
+      const visible = currentFilter === 'all'
+        ? liveSessions
+        : liveSessions.filter(s => ['working','needs_action','ready'].includes(s.status));
+
       if (!visible.length) {
         sessionsListEl.innerHTML = `<div class="sidecar-banner">Aucune session dans cette catégorie.</div>`;
         return;
       }
 
-      sessionsListEl.innerHTML = visible.map(({ s, v }) => `
-        <div class="session ${v}" data-session-id="${escapeHtml(s.sessionId)}" data-type="${s.type}" title="${escapeHtml(STATUS_LABEL[v] || v)} — clic pour ouvrir">
-          <span class="dot ${v}"></span>
+      const tasks = load();
+      const linkedIds = new Set(tasks.map(t => t.linkedSessionId).filter(Boolean));
+
+      sessionsListEl.innerHTML = visible.map(s => `
+        <div class="session ${s.status} ${linkedIds.has(s.sessionId) ? 'linked' : ''}"
+             data-title="${escapeHtml(s.title || '')}"
+             data-session-id="${escapeHtml(s.sessionId)}"
+             title="${escapeHtml(STATUS_LABEL[s.status] || s.status)} — clic pour ouvrir dans Claude Desktop">
+          <span class="dot ${s.status}"></span>
           <div class="session-title">
-            <span class="type-badge ${s.type}">${s.type}</span>
             ${escapeHtml(s.title || s.sessionId.slice(0, 8) + '…')}
             ${s.project ? `<span class="session-project">${escapeHtml(s.project)}</span>` : ''}
           </div>
           <span class="session-when">${relTime(s.lastEventTime)}</span>
+          <button class="btn session-link-btn" data-action="link-session">🔗 lier</button>
         </div>
       `).join('');
+
       sessionsListEl.querySelectorAll('.session').forEach(el => {
-        el.addEventListener('click', () => openSession(el.dataset.type, el.dataset.sessionId));
+        el.addEventListener('click', e => {
+          if (e.target.dataset.action === 'link-session') {
+            e.stopPropagation();
+            quickLinkSession(el.dataset.sessionId, el.dataset.title);
+            return;
+          }
+          openInDesktop(el.dataset.title);
+        });
       });
     }
 
-    async function openSession(type, sessionId) {
-      if (!sessionId) return;
-      let deepLink, fallback;
-      if (type === 'code')   { deepLink = `claude://code/${sessionId}`;          fallback = `claude --resume ${sessionId}`; }
-      else if (type === 'chat')   { deepLink = `claude://claude.ai/chat/${sessionId}`; fallback = null; }
-      else if (type === 'cowork') { deepLink = `claude://cowork/${sessionId}`;        fallback = null; }
-      else return;
+    function quickLinkSession(sessionId, title) {
+      const tasks = load();
+      if (!tasks.length) { toast('Aucune tâche à lier'); return; }
+      const choice = prompt(`Quelle tâche lier à « ${title} » ?\n\n` + tasks.map((t, i) => `${i+1}. ${t.title}`).join('\n') + `\n\n(saisir le numéro)`);
+      if (!choice) return;
+      const idx = parseInt(choice, 10) - 1;
+      if (Number.isNaN(idx) || idx < 0 || idx >= tasks.length) { toast('Choix invalide'); return; }
+      updateTask(tasks[idx].id, { linkedSessionId: sessionId });
+      toast(`« ${title} » liée à « ${tasks[idx].title} »`);
+    }
 
-      try { window.location.href = deepLink; } catch {}
-      if (fallback) {
-        try { await navigator.clipboard.writeText(fallback); toast(`Tentative + copié : ${fallback}`); }
-        catch { toast(`Ouverture tentée. Fallback : ${fallback}`); }
-      } else {
-        toast('Ouverture dans Claude Desktop…');
+    async function openInDesktop(title) {
+      if (!title) { toast('Pas de titre — impossible de localiser dans Claude Desktop'); return; }
+      try {
+        const r = await fetch(`${SIDECAR_BASE}/api/open`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ title }),
+        });
+        const data = await r.json();
+        if (data.ok) {
+          toast('Ouvert dans Claude Desktop');
+        } else if (data.out && data.out.startsWith('miss:')) {
+          toast(`Pas trouvée dans Claude Desktop : « ${title} »`);
+        } else {
+          toast('Échec : ' + (data.err || data.out || 'inconnue'));
+        }
+      } catch (e) {
+        toast('Erreur réseau : ' + e.message);
       }
     }
 
@@ -623,7 +941,10 @@
         const data = await r.json();
         sidecarAlive = true;
         liveSessions = data.sessions || [];
+        hooksInstalled = !!data.hooksInstalled;
         renderSessions();
+        // re-render kanban so linked-session badges stay fresh
+        render();
       } catch {
         if (sidecarAlive || liveSessions.length === 0) {
           sidecarAlive = false;
@@ -632,7 +953,6 @@
       }
     }
 
-    // SSE for instant push when something changes; HTTP poll every 2s as a safety net.
     function connectSse() {
       try {
         const es = new EventSource(`${SIDECAR_BASE}/api/events`);
@@ -642,7 +962,9 @@
             if (msg.type === 'snapshot') {
               sidecarAlive = true;
               liveSessions = msg.sessions || [];
+              hooksInstalled = !!msg.hooksInstalled;
               renderSessions();
+              render();
             }
           } catch {}
         };
@@ -652,9 +974,8 @@
 
     pollSessions();
     connectSse();
-    setInterval(pollSessions, 2000);
-    // Refresh relative times even when nothing changed server-side
-    setInterval(() => { if (sidecarAlive && liveSessions.length) renderSessions(); }, 15_000);
+    setInterval(pollSessions, 3000);
+    setInterval(() => { if (sidecarAlive) renderSessions(); }, 15_000);
   </script>
 </body>
 </html>

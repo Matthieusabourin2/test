@@ -1,7 +1,7 @@
 {
   "name": "claude-dashboard-sidecar",
-  "version": "0.2.0",
-  "description": "Local sidecar that reads Claude Code, Claude Chat, and Claude Cowork local state and exposes it to the dashboard.",
+  "version": "0.3.0",
+  "description": "Local sidecar that reads Claude Code hook events and exposes a unified view to the dashboard. Uses macOS Accessibility (osascript) to open existing sessions in Claude Desktop.",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,8 +9,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "dependencies": {
-    "classic-level": "^1.4.1"
   }
 }

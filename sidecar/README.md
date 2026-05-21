@@ -1,56 +1,98 @@
 # Sidecar
 
-Local Node.js service that watches Claude on your Mac and exposes a unified
-view of Claude Code, Claude Cowork, and (best-effort) Claude Chat sessions
-to the dashboard in real time.
+Local-only Node.js service backing the Claude Tasks Dashboard. Reads Claude
+Code's lifecycle hooks (no cloud, no terminal, no LevelDB parsing) and uses
+macOS Accessibility to open existing sessions in Claude Desktop.
+
+## How it works
+
+```
+Claude Code (CLI + Desktop)
+        │  emits SessionStart / Stop / PermissionRequest / Notification / …
+        ▼
+~/.claude/dashboard/hook.py  →  appends to  ~/.claude/dashboard-events.jsonl
+        │
+        ▼
+sidecar tails the log, derives per-session status
+        │
+        ▼
+/api/sessions  +  /api/events (SSE)  →  dashboard (http://localhost:8765)
+```
 
 ## Setup (one time)
 
 ```bash
 cd sidecar
-npm install          # pulls classic-level for LevelDB reads
 node index.js
 ```
 
-Then open the printed URL (default `http://localhost:8765/`).
+Open the URL it prints (default `http://localhost:8765/`), then click
+**Installer les hooks** in the banner. That:
 
-## What it reads
+1. Writes the hook script to `~/.claude/dashboard/hook.py`
+2. Registers it for every lifecycle event in `~/.claude/settings.json`
+   (your existing settings are backed up to `settings.json.dashboard-backup.<ts>`)
 
-| Source | Path | Format |
-|---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl` | JSONL, plain text |
-| Cowork | `~/Library/Application Support/Claude/local-agent-mode-sessions/<account>/<session>/local_*.json` | JSON |
-| Chat conversations | `~/Library/Application Support/Claude/IndexedDB/https_claude.ai_0.indexeddb.leveldb/` | LevelDB + Blink serialization |
-| Desktop "viewed" state | `~/Library/Application Support/Claude/shared_proto_db/` | LevelDB + protobuf |
+From then on, every Claude Code session — CLI or Claude Desktop — fires the
+hook, the sidecar sees the event in real time, and the dashboard updates.
 
-For LevelDB sources, Claude Desktop holds an exclusive lock while it runs,
-so the sidecar copies the directory to `$TMPDIR/claude-dashboard-leveldb/`
-before opening. The copy is refreshed every 15 seconds.
+### Opening sessions in Claude Desktop
 
-## What you get
+Clicking a session in the dashboard runs `osascript` against Claude Desktop
+via the macOS Accessibility API. On first use macOS will prompt you to grant
+Accessibility permission to whatever ran the sidecar (Terminal / iTerm / your
+shell). Open **System Settings → Privacy & Security → Accessibility** and
+enable the prompted app. One-time setup.
 
-- 🔵 **en cours** — file activity in the last 60 seconds
-- 🟢 **pas encore lu** — Claude finished something and Desktop hasn't recorded
-  that you opened it. If `viewedAt` couldn't be extracted from `shared_proto_db`,
-  the sidecar falls back to "unread" by default.
-- 🟢 **lu** — `viewedAt >= lastEventTime` from Desktop's own state
-- ⚪ **inactive** — > 24h since last activity (kept up to 7d then dropped)
+## Status values
 
-Click a session to open it in Claude Desktop:
-- **CODE** → tries `claude://code/<id>` and copies `claude --resume <id>` to clipboard
-- **COWORK** → `claude://cowork/<id>`
-- **CHAT** → `claude://claude.ai/chat/<id>`
+| Status         | Derived from                                                   |
+|----------------|----------------------------------------------------------------|
+| `working`      | `UserPromptSubmit` seen, no matching `Stop` yet                |
+| `needs_action` | `PermissionRequest`, or `Notification` with permission/idle matcher |
+| `ready`        | `Stop` received, nothing since                                 |
+| `idle`         | No events for 10+ min while working, or just no activity       |
+| `finished`     | `SessionEnd`                                                   |
+| `unknown`      | Session JSONL exists but the dashboard never saw any hook event (e.g. session ran before hooks were installed) |
 
-## Caveats
+Sessions with no activity for 24h are dropped from the list (unless they
+are in `needs_action`).
 
-- **Chat / Cowork / desktop-state are best-effort**. LevelDB itself is read
-  reliably, but the *values* inside use Chromium-specific binary encodings
-  (Blink structured-clone for IndexedDB, protobuf for shared_proto_db). We
-  extract UUIDs, plausible UTF-8 strings, and 64-bit ms timestamps via
-  pattern matching — not by decoding the full schema. Titles may show as
-  partial strings or fallback to UUID prefixes.
-- If `npm install` hasn't been run, the sidecar still works for Claude Code
-  only and prints a warning.
+## API
+
+| Endpoint                 | Method | Description                                          |
+|--------------------------|--------|------------------------------------------------------|
+| `/`                      | GET    | Serves the dashboard                                 |
+| `/api/sessions`          | GET    | Current snapshot of all tracked sessions             |
+| `/api/events`            | GET    | Server-Sent Events stream — pushes snapshots on change |
+| `/api/install-hooks`     | POST   | Idempotent: installs the hook script and updates settings.json |
+| `/api/open`              | POST   | `{ "title": "..." }` — asks Claude Desktop to focus and click that sidebar row |
+
+## Files
+
+```
+sidecar/
+├── index.js                      # the server
+├── package.json
+└── applescript/
+    └── open-session.applescript  # AX click-by-title used by /api/open
+
+hooks/
+└── dashboard-event.py            # installed at ~/.claude/dashboard/hook.py
+```
+
+## Notes & limits
+
+- **Claude Code sessions only.** Hooks fire for Claude Code sessions (CLI and
+  Desktop Code mode). Cowork and Chat sessions don't go through this hook
+  pipeline; they're not surfaced by this version.
+- **No cloud.** The sidecar only reads local files; no network calls leave
+  your machine.
+- **No terminal.** Opening a session goes through Accessibility into Claude
+  Desktop, not via a terminal command.
+- **Idempotent install.** Running the install endpoint twice is safe — the
+  dashboard's hook entry is removed and re-added rather than duplicated, and
+  the previous `settings.json` is always backed up first.
 
 ## Configuration
 
