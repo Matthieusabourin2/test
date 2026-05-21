@@ -205,6 +205,18 @@
       background: var(--panel-2);
       border-radius: 3px;
     }
+    .session-kind {
+      font-size: 0.62rem;
+      padding: 1px 5px;
+      border-radius: 3px;
+      margin-right: 6px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      vertical-align: middle;
+    }
+    .session-kind.code   { background: rgba(37,99,235,0.15);  color: #2563eb; }
+    .session-kind.cowork { background: rgba(168,85,247,0.15); color: #9333ea; }
     .session.linked .session-title::before {
       content: "📌 ";
       font-size: 0.85em;
@@ -882,6 +894,7 @@
              title="${escapeHtml(STATUS_LABEL[s.status] || s.status)} — clic pour ouvrir dans Claude Desktop">
           <span class="dot ${s.status}"></span>
           <div class="session-title">
+            ${s.kind ? `<span class="session-kind ${s.kind}">${escapeHtml(s.kind)}</span>` : ''}
             ${escapeHtml(s.title || s.sessionId.slice(0, 8) + '…')}
             ${s.project ? `<span class="session-project">${escapeHtml(s.project)}</span>` : ''}
           </div>
