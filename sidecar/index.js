@@ -1,565 +1,470 @@
 #!/usr/bin/env node
-// Claude Dashboard sidecar — local-only, hook-driven.
+// Claude Dashboard sidecar
 //
-// Architecture (everything on this Mac, no cloud):
+// Surfaces Claude Code, Claude Cowork, and Claude Chat sessions in one unified
+// view and lets the dashboard open any of them in Claude Desktop on the right
+// conversation.
 //
-//   Claude Code (CLI + Desktop)
-//        │  emits lifecycle events
-//        ▼
-//   ~/.claude/dashboard/hook.py  →  appends to  ~/.claude/dashboard-events.jsonl
-//        │
-//        ▼
-//   sidecar tails the log, builds a per-session state machine
-//        │
-//        ▼
-//   /api/sessions  +  /api/events (SSE)  →  dashboard
+// Sources of truth:
+//   Code   - ~/.claude/projects/*/<id>.jsonl     (title + project + cwd)
+//          - ~/.claude/dashboard-events.jsonl    (live status from hook events)
+//   Cowork - ~/Library/Application Support/Claude/local-agent-mode-sessions/
+//            <account>/<workspace>/local_*.json   (title + lastActivityAt)
+//   Chat   - lecture de la sidebar Claude Desktop via macOS Accessibility
+//            (script JXA dans applescript/read-claude-sidebar.js)
 //
-// Click-to-open uses osascript (macOS Accessibility) to focus Claude Desktop
-// and click the matching sidebar row — no terminal, no URL scheme.
+// Open-session: AppleScript that activates Claude Desktop and AXPress the row
+// whose title matches (applescript/open-session.applescript).
 
 import { createServer } from 'node:http';
-import { readFile, readdir, stat, writeFile, mkdir, copyFile, appendFile } from 'node:fs/promises';
+import { readFile, readdir, stat, open as openFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { watch, createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
-import { watch } from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
 const HOME = homedir();
 
-const PROJECTS_DIR = path.join(HOME, '.claude', 'projects');
-const EVENTS_LOG = path.join(HOME, '.claude', 'dashboard-events.jsonl');
-const SETTINGS_FILE = path.join(HOME, '.claude', 'settings.json');
-const HOOK_INSTALL_DIR = path.join(HOME, '.claude', 'dashboard');
-const HOOK_INSTALL_PATH = path.join(HOOK_INSTALL_DIR, 'hook.py');
-const HOOK_SOURCE_PATH = path.resolve(REPO_ROOT, 'hooks', 'dashboard-event.py');
-const OPEN_APPLESCRIPT = path.join(__dirname, 'applescript', 'open-session.applescript');
-const READ_SIDEBAR_JS = path.join(__dirname, 'applescript', 'read-sidebar.js');
+const PROJECTS_DIR    = path.join(HOME, '.claude', 'projects');
+const APP_SUPPORT_DIR = path.join(HOME, 'Library', 'Application Support', 'Claude');
+const COWORK_DIR      = path.join(APP_SUPPORT_DIR, 'local-agent-mode-sessions');
+const HOOK_LOG        = path.join(HOME, '.claude', 'dashboard-events.jsonl');
+
+const OPEN_SCRIPT     = path.join(__dirname, 'applescript', 'open-session.applescript');
+const READ_AX_SCRIPT  = path.join(__dirname, 'applescript', 'read-claude-sidebar.js');
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
 
-// Status timing
-const STALE_MS = 24 * 60 * 60 * 1000;        // session disappears after 24h idle
-const WORKING_TIMEOUT_MS = 10 * 60 * 1000;   // if no Stop event after 10min, assume hung
-const AX_REFRESH_MS = 8 * 1000;              // re-read Claude Desktop sidebar every 8s
-const AX_TIMEOUT_MS = 6 * 1000;              // osascript ax dump timeout
+const POLL_MS           = 3000;
+const AX_POLL_MS        = 8000;
+const AX_TIMEOUT_MS     = 6000;
+const CODE_RECENT_MS    = 7 * 24 * 60 * 60 * 1000;
+const COWORK_RECENT_MS  = 30 * 24 * 60 * 60 * 1000;
+const COWORK_CAP        = 100;
+const WORKING_TIMEOUT_MS = 5 * 60 * 1000;
+const HEAD_BYTES = 8 * 1024;
+const TAIL_BYTES = 32 * 1024;
 
-// Hook events we wire up
-const HOOK_EVENTS = [
-  'SessionStart',
-  'UserPromptSubmit',
-  'PreToolUse',
-  'PostToolUse',
-  'PermissionRequest',
-  'Notification',
-  'Stop',
-  'SessionEnd',
-  'SubagentStart',
-  'SubagentStop',
-];
-
-// ----- state -----
-
-// sessionId -> { sessionId, title, cwd, project, lastEventTime, status, lastEvent, transcriptPath }
-const sessions = new Map();
+const sessions  = new Map();   // key -> session record
 const sseClients = new Set();
-let lastBroadcast = '';
-let hooksInstalled = false;
+const hookStatus = new Map();  // sessionId -> { event, ts, toolName }
+let hookLogOffset = 0;
+let lastSnapshotJson = '';
+let axCache = { items: [], error: null, ts: 0, parsed: [] };
 
-// ----- file utilities -----
+// ============================================================================
+// helpers
+// ============================================================================
 
-async function safeStat(p) {
-  try { return await stat(p); } catch { return null; }
+async function safeStat(p) { try { return await stat(p); } catch { return null; } }
+async function safeReaddir(p) { try { return await readdir(p, { withFileTypes: true }); } catch { return []; } }
+async function safeReadFile(p, enc = 'utf-8') { try { return await readFile(p, enc); } catch { return null; } }
+
+async function readHead(filePath) {
+  const fh = await openFile(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(HEAD_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, HEAD_BYTES, 0);
+    return buf.subarray(0, bytesRead).toString('utf-8');
+  } finally { await fh.close(); }
 }
 
-async function safeReaddir(p) {
-  try { return await readdir(p, { withFileTypes: true }); } catch { return []; }
+async function readTail(filePath, totalSize) {
+  const fh = await openFile(filePath, 'r');
+  try {
+    const start = Math.max(0, totalSize - TAIL_BYTES);
+    const len = totalSize - start;
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, start);
+    return { text: buf.toString('utf-8'), startedAtZero: start === 0 };
+  } finally { await fh.close(); }
 }
 
-// ----- Code project metadata (titles, cwd, JSONL-derived status) -----
-//
-// Claude Code's JSONL files don't contain an explicit title field — Claude
-// Desktop's displayed title is generated by a cloud call we can't see. So
-// for the dashboard we fall back to the first user message (truncated),
-// which is what Claude Desktop also uses before its AI titler runs.
-//
-// We also read the JSONL tail to derive a status for sessions that started
-// BEFORE the hooks were installed (otherwise they'd all be `unknown` forever).
-
-function extractTextFromMessageContent(content) {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    for (const item of content) {
-      if (item && typeof item === 'object') {
-        if (typeof item.text === 'string') return item.text;
-        if (item.type === 'text' && typeof item.content === 'string') return item.content;
-      }
-    }
-  }
-  return '';
+function parseJsonLines(text, dropFirst) {
+  const lines = text.split('\n').filter(Boolean);
+  if (dropFirst && lines.length) lines.shift();
+  const out = [];
+  for (const l of lines) { try { out.push(JSON.parse(l)); } catch {} }
+  return out;
 }
 
-function makeTitleFromText(text) {
-  if (!text) return null;
-  const cleaned = text.replace(/\s+/g, ' ').trim();
-  if (!cleaned) return null;
-  if (cleaned.length <= 70) return cleaned;
-  return cleaned.slice(0, 67) + '…';
-}
+// ============================================================================
+// Code scanner
+// ============================================================================
 
-// Status derived from JSONL content alone, for sessions we have no hook
-// data for. This is a heuristic but it gives meaningful values instead of
-// "unknown" for everything pre-install.
-//
-//   working       — file mtime < 60s (file is actively being written)
-//   needs_action  — last assistant message ends with stop_reason=tool_use
-//                   AND no following user/tool_result in the file
-//                   (Claude is waiting for a permission decision)
-//   ready         — last assistant message ends with stop_reason=end_turn
-//                   AND mtime > 60s (Claude finished, waiting for you)
-//   idle          — otherwise
-function deriveStatusFromJsonl({ lastEvents, mtimeMs }) {
-  const ageMs = Date.now() - (mtimeMs || 0);
-  if (ageMs < 60_000) return 'working';
-
-  // Walk events in reverse to find the most recent meaningful one
-  for (let i = lastEvents.length - 1; i >= 0; i--) {
-    const ev = lastEvents[i];
-    if (ev.type === 'user') {
-      // A user message after assistant usually means we're mid-turn — but
-      // since the file isn't being written (ageMs >= 60s), the session is
-      // probably idle / abandoned.
-      return 'idle';
-    }
-    if (ev.type === 'assistant') {
-      const msg = ev.message || {};
-      const stopReason = msg.stop_reason || msg.stopReason;
-      if (stopReason === 'tool_use') {
-        // Pending tool use that wasn't followed by a tool_result — likely
-        // waiting on a permission prompt the user hasn't answered.
-        return 'needs_action';
-      }
-      if (stopReason === 'end_turn' || stopReason === 'stop_sequence') {
-        return 'ready';
-      }
-      return 'ready'; // best guess for other stop reasons
-    }
-  }
-  return 'idle';
-}
-
-async function indexCodeMetadata() {
-  const meta = new Map();
-  const dirs = await safeReaddir(PROJECTS_DIR);
-  for (const d of dirs) {
-    if (!d.isDirectory()) continue;
-    const dirPath = path.join(PROJECTS_DIR, d.name);
-    const files = await safeReaddir(dirPath);
-    for (const f of files) {
-      if (!f.isFile() || !f.name.endsWith('.jsonl')) continue;
-      const sessionId = f.name.slice(0, -'.jsonl'.length);
-      const filePath = path.join(dirPath, f.name);
-      const st = await safeStat(filePath);
-      if (!st) continue;
-      const info = { sessionId, filePath, mtime: st.mtimeMs };
-
-      // Read the head (for cwd, gitBranch, first user message)
-      try {
-        const buf = await readFile(filePath);
-        const headText = buf.subarray(0, Math.min(buf.length, 32 * 1024)).toString('utf-8');
-        for (const line of headText.split('\n').filter(Boolean)) {
-          try {
-            const ev = JSON.parse(line);
-            if (ev.cwd && !info.cwd) info.cwd = ev.cwd;
-            if (ev.gitBranch && !info.gitBranch) info.gitBranch = ev.gitBranch;
-            if (!info.title && ev.type === 'user' && ev.message) {
-              const text = extractTextFromMessageContent(ev.message.content);
-              const title = makeTitleFromText(text);
-              if (title) info.title = title;
-            }
-            if (info.title && info.cwd && info.gitBranch) break;
-          } catch {}
-        }
-
-        // Read the tail (last few events) for status derivation
-        const tailStart = Math.max(0, buf.length - 16 * 1024);
-        const tailText = buf.subarray(tailStart).toString('utf-8');
-        const tailLines = tailText.split('\n').filter(Boolean);
-        // Skip the first line if we sliced mid-line
-        const startIdx = tailStart === 0 ? 0 : 1;
-        const lastEvents = [];
-        for (const line of tailLines.slice(startIdx)) {
-          try { lastEvents.push(JSON.parse(line)); } catch {}
-        }
-        info.lastEvents = lastEvents.slice(-12);
-        info.jsonlStatus = deriveStatusFromJsonl({ lastEvents: info.lastEvents, mtimeMs: st.mtimeMs });
-      } catch {}
-
-      info.project = info.cwd ? path.basename(info.cwd) : d.name;
-      meta.set(sessionId, info);
-    }
-  }
-  return meta;
-}
-
-// ----- hook event log -----
-//
-// We tail ~/.claude/dashboard-events.jsonl. Each line is a JSON record:
-//   { ts, event, session_id, cwd, transcript_path, matcher, ... }
-//
-// We track byte position and re-read on file change. New sessions are added
-// the first time we see a SessionStart (or any event with their id); state
-// is derived by combining the most recent few events per session.
-
-let eventLogPosition = 0;
-let eventsBySession = new Map(); // sessionId -> array of recent events (cap 30)
-
-function pushEvent(rec) {
-  if (!rec || !rec.session_id) return;
-  const arr = eventsBySession.get(rec.session_id) || [];
-  arr.push(rec);
-  if (arr.length > 30) arr.shift();
-  eventsBySession.set(rec.session_id, arr);
-}
-
-async function readEventLogIncremental() {
-  const st = await safeStat(EVENTS_LOG);
-  if (!st) return;
-  if (st.size < eventLogPosition) {
-    // log was rotated/truncated
-    eventLogPosition = 0;
-    eventsBySession.clear();
-  }
-  if (st.size === eventLogPosition) return;
-
-  const buf = await readFile(EVENTS_LOG);
-  const slice = buf.subarray(eventLogPosition).toString('utf-8');
-  eventLogPosition = buf.length;
-
-  for (const line of slice.split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const rec = JSON.parse(line);
-      pushEvent(rec);
-    } catch {}
-  }
-}
-
-// ----- state derivation -----
-//
-// Status meaning:
-//   working      — Claude is processing (UserPromptSubmit observed, no Stop yet)
-//   needs_action — Claude is waiting for the user (PermissionRequest pending, or
-//                  a Notification with matcher=permission_prompt/idle_prompt)
-//   ready        — Claude finished (Stop observed) and you haven't started a
-//                  new turn since; the "unread / brown done" state
-//   idle         — Nothing recent, session not finished
-//   finished     — SessionEnd received
-
-function deriveSessionStatus(events) {
-  if (!events || events.length === 0) return { status: 'idle', lastEventTime: 0 };
-
-  let status = 'idle';
-  let lastEventTime = 0;
-  let pendingPermission = false;
-  let working = false;
-  let ended = false;
-
-  // walk in chronological order so transitions update state
-  for (const ev of events) {
-    const t = Date.parse(ev.ts) || 0;
-    if (t > lastEventTime) lastEventTime = t;
-
-    switch (ev.event) {
-      case 'SessionStart':
-        working = false;
-        pendingPermission = false;
-        break;
-      case 'UserPromptSubmit':
-        working = true;
-        pendingPermission = false;
-        break;
-      case 'PreToolUse':
-      case 'PostToolUse':
-        working = true;
-        break;
-      case 'PermissionRequest':
-        pendingPermission = true;
-        break;
-      case 'Notification':
-        if (ev.matcher === 'permission_prompt' || ev.matcher === 'idle_prompt' || ev.matcher === 'elicitation_dialog') {
-          pendingPermission = true;
-        }
-        break;
-      case 'Stop':
-        working = false;
-        pendingPermission = false;
-        break;
-      case 'SessionEnd':
-        working = false;
-        pendingPermission = false;
-        ended = true;
-        break;
-    }
-  }
-
-  if (ended) status = 'finished';
-  else if (pendingPermission) status = 'needs_action';
-  else if (working) {
-    // safety net: if a working session is silent > timeout, mark idle
-    if (Date.now() - lastEventTime > WORKING_TIMEOUT_MS) status = 'idle';
-    else status = 'working';
-  } else if (lastEventTime > 0) {
-    status = 'ready';
-  }
-
-  return { status, lastEventTime };
-}
-
-// ----- Cowork scanner -----
-//
-// Cowork doesn't go through Claude Code's hook system, but Claude Desktop
-// writes a local cache at:
-//   ~/Library/Application Support/Claude/local-agent-mode-sessions/<account>/<session>/local_*.json
-//
-// We surface those sessions with a title (best-effort from the JSON fields)
-// and a status derived from file mtime, since we have no event stream for them.
-
-const COWORK_DIR = path.join(HOME, 'Library', 'Application Support', 'Claude', 'local-agent-mode-sessions');
-
-function deriveStatusFromMtime(mtimeMs) {
-  const age = Date.now() - mtimeMs;
-  if (age < 60_000) return 'working';
-  if (age < 30 * 60_000) return 'ready'; // recent — likely "brown" in Desktop
-  return 'idle';
-}
-
-async function scanCowork() {
-  const out = new Map();
-  const accountDirs = await safeReaddir(COWORK_DIR);
-  for (const acct of accountDirs) {
-    if (!acct.isDirectory()) continue;
-    const sessionDirs = await safeReaddir(path.join(COWORK_DIR, acct.name));
-    for (const sess of sessionDirs) {
-      if (!sess.isDirectory()) continue;
-      const sessPath = path.join(COWORK_DIR, acct.name, sess.name);
-      const files = await safeReaddir(sessPath);
-      let latestMtime = 0;
-      let title = null;
-      let taskCount = 0;
-      for (const f of files) {
-        if (!f.isFile() || !f.name.endsWith('.json')) continue;
-        taskCount++;
-        const fp = path.join(sessPath, f.name);
-        const st = await safeStat(fp);
-        if (!st) continue;
-        if (st.mtimeMs > latestMtime) latestMtime = st.mtimeMs;
-        if (!title) {
-          try {
-            const obj = JSON.parse(await readFile(fp, 'utf-8'));
-            for (const k of ['title', 'name', 'displayName', 'taskTitle', 'description', 'prompt']) {
-              const v = obj?.[k];
-              if (typeof v === 'string' && v.trim() && v.length < 300) {
-                title = makeTitleFromText(v);
-                break;
-              }
-            }
-          } catch {}
-        }
-      }
-      if (taskCount === 0) continue;
-      if (Date.now() - latestMtime > STALE_MS) continue;
-      out.set(`cowork:${sess.name}`, {
-        sessionId: sess.name,
-        kind: 'cowork',
-        title: title || `Cowork ${sess.name.slice(0, 8)}…`,
-        project: `${taskCount} task${taskCount > 1 ? 's' : ''}`,
-        cwd: null,
-        gitBranch: null,
-        lastEventTime: latestMtime,
-        status: deriveStatusFromMtime(latestMtime),
-        hasHookData: false,
-      });
+async function listCodeJsonl(dir, out = []) {
+  for (const e of await safeReaddir(dir)) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (e.name === 'memory' || e.name === 'subagents' || e.name === 'tool-results') continue;
+      await listCodeJsonl(p, out);
+    } else if (e.isFile() && e.name.endsWith('.jsonl')) {
+      const st = await safeStat(p);
+      if (!st || Date.now() - st.mtimeMs > CODE_RECENT_MS) continue;
+      out.push({ path: p, mtimeMs: st.mtimeMs, size: st.size });
     }
   }
   return out;
 }
 
-
-// ----- Claude Desktop sidebar reader (macOS Accessibility) -----
-
-let axCache = { items: [], error: null, ts: 0 };
-let axInFlight = null;
-
-function runAxRead() {
-  if (process.platform !== 'darwin') {
-    return Promise.resolve({ error: 'not_darwin', items: [] });
+function extractUserText(ev) {
+  const c = ev?.message?.content;
+  if (typeof c === 'string') return c;
+  if (Array.isArray(c)) {
+    for (const chunk of c) {
+      if (chunk && chunk.type === 'text' && typeof chunk.text === 'string') return chunk.text;
+    }
   }
-  if (axInFlight) return axInFlight;
+  return null;
+}
 
+async function scanHeadByLines(filePath, maxLines = 40) {
+  // Stream the file line-by-line until we have enough info or hit maxLines.
+  // Lines can be huge (base64 image content) so byte-based slicing won't work.
+  const stream = createReadStream(filePath, { encoding: 'utf-8', highWaterMark: 64 * 1024 });
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+
+  const result = { aiTitle: null, userText: null, cwd: null, gitBranch: null, sessionId: null };
+  let count = 0;
+  try {
+    for await (const line of rl) {
+      count++;
+      if (count > maxLines) break;
+      if (!line) continue;
+      let ev;
+      try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.type === 'ai-title' && ev.aiTitle) result.aiTitle = ev.aiTitle;
+      if (!result.userText && ev.type === 'user') {
+        const t = extractUserText(ev);
+        if (t && t.trim()) result.userText = t.trim();
+      }
+      if (!result.cwd && ev.cwd) result.cwd = ev.cwd;
+      if (!result.gitBranch && ev.gitBranch) result.gitBranch = ev.gitBranch;
+      if (!result.sessionId && ev.sessionId) result.sessionId = ev.sessionId;
+      if (result.aiTitle && result.userText && result.cwd && result.sessionId) break;
+    }
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+  return result;
+}
+
+async function scanCodeFile({ path: filePath, mtimeMs, size }) {
+  let aiTitle = null, userMsg = null, cwd = null, gitBranch = null, sessionId = null;
+  try {
+    const head = await scanHeadByLines(filePath);
+    aiTitle = head.aiTitle;
+    userMsg = head.userText;
+    cwd = head.cwd;
+    gitBranch = head.gitBranch;
+    sessionId = head.sessionId;
+  } catch {}
+
+  let lastEvent = null;
+  try {
+    const tail = await readTail(filePath, size);
+    const evs = parseJsonLines(tail.text, !tail.startedAtZero);
+    lastEvent = evs[evs.length - 1] || null;
+    for (const ev of evs.slice().reverse()) {
+      if (!cwd && ev.cwd) cwd = ev.cwd;
+      if (!gitBranch && ev.gitBranch) gitBranch = ev.gitBranch;
+      if (cwd && gitBranch) break;
+    }
+  } catch {}
+
+  if (!sessionId) sessionId = path.basename(filePath, '.jsonl');
+  const lastEventTime = lastEvent?.timestamp ? Date.parse(lastEvent.timestamp) : mtimeMs;
+  const eventTime = Math.max(lastEventTime || 0, mtimeMs);
+
+  const isWorktree = /claude-worktrees/i.test(filePath);
+  const project = cwd ? path.basename(cwd) : path.basename(path.dirname(filePath));
+
+  let title = aiTitle;
+  if (!title && userMsg) title = userMsg.trim().slice(0, 70);
+  if (!title) title = `Session ${sessionId.slice(0, 8)}…`;
+
+  return {
+    key: `code:${sessionId}`,
+    kind: 'code',
+    sessionId, title, project, cwd, gitBranch, isWorktree,
+    lastEventTime: eventTime,
+    mtime: mtimeMs,
+    filePath,
+  };
+}
+
+async function scanCode() {
+  const files = await listCodeJsonl(PROJECTS_DIR);
+  const map = new Map();
+  for (const f of files) {
+    const data = await scanCodeFile(f);
+    if (data) map.set(data.key, data);
+  }
+  return map;
+}
+
+// ============================================================================
+// Cowork scanner
+// ============================================================================
+
+async function scanCowork() {
+  const candidates = [];
+  for (const acct of await safeReaddir(COWORK_DIR)) {
+    if (!acct.isDirectory()) continue;
+    const acctPath = path.join(COWORK_DIR, acct.name);
+    for (const ws of await safeReaddir(acctPath)) {
+      if (!ws.isDirectory()) continue;
+      const wsPath = path.join(acctPath, ws.name);
+      for (const f of await safeReaddir(wsPath)) {
+        if (!f.isFile() || !f.name.startsWith('local_') || !f.name.endsWith('.json')) continue;
+        const fp = path.join(wsPath, f.name);
+        const st = await safeStat(fp);
+        if (!st) continue;
+        if (Date.now() - st.mtimeMs > COWORK_RECENT_MS) continue;
+        candidates.push({ fp, mtime: st.mtimeMs });
+      }
+    }
+  }
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  candidates.length = Math.min(candidates.length, COWORK_CAP);
+
+  const map = new Map();
+  for (const { fp, mtime } of candidates) {
+    const txt = await safeReadFile(fp);
+    if (!txt) continue;
+    let obj;
+    try { obj = JSON.parse(txt); } catch { continue; }
+    if (obj.isArchived) continue;
+    const sessionId = obj.sessionId || path.basename(fp, '.json');
+    const title = obj.title || obj.initialMessage?.slice(0, 70) || `Cowork ${sessionId.slice(6, 14)}…`;
+    const lastActivity = typeof obj.lastActivityAt === 'number' ? obj.lastActivityAt : mtime;
+    map.set(`cowork:${sessionId}`, {
+      key: `cowork:${sessionId}`,
+      kind: 'cowork',
+      sessionId,
+      title,
+      project: obj.processName || null,
+      cwd: obj.cwd || null,
+      lastEventTime: lastActivity,
+      mtime,
+    });
+  }
+  return map;
+}
+
+// ============================================================================
+// Chat via AX
+// ============================================================================
+
+let axInFlight = null;
+function runAxRead() {
+  if (process.platform !== 'darwin') return Promise.resolve({ error: 'not_darwin', items: [] });
+  if (axInFlight) return axInFlight;
   axInFlight = new Promise((resolve) => {
-    const proc = spawn('osascript', [READ_SIDEBAR_JS], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn('osascript', [READ_AX_SCRIPT], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
     let done = false;
-    const finish = (result) => { if (done) return; done = true; axInFlight = null; resolve(result); };
-    const timer = setTimeout(() => { try { proc.kill(); } catch {} finish({ error: 'timeout', items: [] }); }, AX_TIMEOUT_MS);
+    const finish = (r) => { if (done) return; done = true; axInFlight = null; resolve(r); };
+    const t = setTimeout(() => { try { proc.kill(); } catch {} finish({ error: 'timeout', items: [] }); }, AX_TIMEOUT_MS);
     proc.stdout.on('data', d => out += d.toString());
     proc.stderr.on('data', d => err += d.toString());
     proc.on('close', () => {
-      clearTimeout(timer);
+      clearTimeout(t);
       try {
         const parsed = JSON.parse(out.trim());
         if (parsed.error) finish({ error: parsed.error, message: parsed.message, items: [] });
         else finish({ items: parsed.items || [], truncated: !!parsed.truncated });
       } catch (e) {
-        finish({ error: 'parse_failed', stderr: err.trim().slice(0, 200), items: [] });
+        finish({ error: 'parse_failed', stderr: err.trim().slice(0, 300), raw: out.slice(0, 300), items: [] });
       }
     });
-    proc.on('error', e => { clearTimeout(timer); finish({ error: 'spawn_failed', message: e.message, items: [] }); });
+    proc.on('error', e => { clearTimeout(t); finish({ error: 'spawn_failed', message: e.message, items: [] }); });
   });
   return axInFlight;
 }
 
-async function refreshAxIfStale() {
-  if (Date.now() - axCache.ts < AX_REFRESH_MS) return;
-  try {
-    const res = await runAxRead();
-    axCache = { ...res, ts: Date.now() };
-    if (res.error) {
-      if (axCache.lastLoggedError !== res.error) {
-        console.warn(`[sidecar] AX read: ${res.error}${res.message ? ' — ' + res.message : ''}`);
-        axCache.lastLoggedError = res.error;
-      }
-    } else if (axCache.lastLoggedError) {
-      console.log('[sidecar] AX read: recovered');
-      axCache.lastLoggedError = null;
-    }
-  } catch {}
-}
+const EXCLUDE_TITLES_RE = /^(new chat|new code|new cowork|new project|settings|search|account|sign in|sign out|share|export|delete|cancel|ok|close|claude|home|menu|filter|sort|today|yesterday|this week|earlier|previous|loading|untitled|chat|cowork|code|chats|conversations?|history|projects?|files?|preview|view|edit|copy|paste|select|all|done|next|back|forward|refresh|reload|stop|continue|retry|send|attach|upload|download|save|open|recent|starred|starred chats|pinned|recents?)$/i;
 
-function parseSidebarSessions(items) {
-  if (!items || !items.length) return [];
-  const sorted = items.slice();
+function parseAxSessions(items) {
+  if (!items?.length) return [];
+
+  const SECTION_RE = {
+    chat:   /^(chat|chats|recent chats|conversations?)$/i,
+    cowork: /^cowork(s)?$/i,
+    code:   /^code(s)?$/i,
+    recent: /^(recents?|today|yesterday|this week|earlier|pinned|starred)$/i,
+  };
   const sections = [];
-  const SECTION_PATTERNS = [
-    { name: 'chat',   re: /^(chat|chats|previous chats|recent chats|conversations?)$/i },
-    { name: 'cowork', re: /^cowork(\s|s)?$/i },
-    { name: 'code',   re: /^code(\s|s)?$/i },
-    { name: 'recent', re: /^(recents?|today|yesterday|this week|earlier)$/i },
-  ];
-  for (let i = 0; i < sorted.length; i++) {
-    const it = sorted[i];
+  items.forEach((it, idx) => {
     const t = (it.t || '').trim();
-    for (const sp of SECTION_PATTERNS) {
-      if (sp.re.test(t)) { sections.push({ name: sp.name, atIndex: i }); break; }
+    for (const [name, re] of Object.entries(SECTION_RE)) {
+      if (re.test(t)) { sections.push({ name, idx }); break; }
     }
-  }
-  const NOT_A_SESSION = /^(new chat|new code|new cowork|new project|settings|search|account|sign in|sign out|share|export|delete|cancel|ok|close|claude|home|menu|filter|sort|today|yesterday|this week|earlier|previous|loading|untitled)$/i;
+  });
+
   const SESSION_ROLES = new Set(['AXButton', 'AXRow', 'AXStaticText', 'AXCell', 'AXMenuItem', 'AXLink']);
-  const candidates = [];
+  const out = [];
   const seen = new Set();
-  for (let i = 0; i < sorted.length; i++) {
-    const it = sorted[i];
+  items.forEach((it, idx) => {
     const t = (it.t || '').trim();
-    if (!t || t.length < 2 || t.length > 200) continue;
-    if (NOT_A_SESSION.test(t)) continue;
-    if (!SESSION_ROLES.has(it.r) && it.r !== '?') continue;
-    let section = 'unknown';
+    if (!t || t.length < 5 || t.length > 200) return;
+    if (EXCLUDE_TITLES_RE.test(t)) return;
+    if (!SESSION_ROLES.has(it.r) && it.r !== '?') return;
+
+    let section = 'chat';
     for (let j = sections.length - 1; j >= 0; j--) {
-      if (sections[j].atIndex < i) { section = sections[j].name; break; }
+      if (sections[j].idx < idx) {
+        section = sections[j].name === 'recent' ? 'chat' : sections[j].name;
+        break;
+      }
     }
-    if (section === 'recent') section = 'chat';
     const dedupKey = `${section}:${t.toLowerCase()}`;
-    if (seen.has(dedupKey)) continue;
+    if (seen.has(dedupKey)) return;
     seen.add(dedupKey);
-    const blob = `${it.desc || ''} ${it.h || ''} ${it.v || ''}`.toLowerCase();
-    let status = 'ready';
-    if (/running|working|in progress|generating/.test(blob)) status = 'working';
-    else if (/needs|waiting|attention|action|unread/.test(blob)) status = 'needs_action';
-    candidates.push({ kind: section, title: t, status, role: it.r, raw: it });
-  }
-  return candidates;
+    out.push({ kind: section, title: t, role: it.r, depth: it.d });
+  });
+  return out;
 }
 
-// ----- aggregate snapshot -----
+async function refreshAxCache() {
+  if (Date.now() - axCache.ts < AX_POLL_MS) return;
+  const res = await runAxRead();
+  axCache = { ...res, ts: Date.now(), parsed: parseAxSessions(res.items || []) };
+  if (res.error && axCache.lastErr !== res.error) {
+    console.warn(`[sidecar] AX read: ${res.error}${res.message ? ' — ' + res.message : ''}`);
+    axCache.lastErr = res.error;
+  } else if (!res.error && axCache.lastErr) {
+    console.log('[sidecar] AX read recovered');
+    axCache.lastErr = null;
+  }
+}
+
+// ============================================================================
+// Hook log tailer
+// ============================================================================
+
+const TERMINAL_EVENTS = new Set(['Stop', 'SessionEnd', 'PostToolUse']);
+const WORKING_EVENTS  = new Set(['PreToolUse', 'UserPromptSubmit', 'SessionStart', 'SubagentStart']);
+const ATTENTION_EVENT = 'PermissionRequest';
+
+async function readHookLogIncremental() {
+  const st = await safeStat(HOOK_LOG);
+  if (!st) return;
+  if (st.size < hookLogOffset) hookLogOffset = 0; // file rotated
+  if (st.size === hookLogOffset) return;
+
+  const fh = await openFile(HOOK_LOG, 'r');
+  try {
+    const len = st.size - hookLogOffset;
+    const buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, hookLogOffset);
+    hookLogOffset = st.size;
+    const lines = buf.toString('utf-8').split('\n').filter(Boolean);
+    for (const line of lines) {
+      let ev;
+      try { ev = JSON.parse(line); } catch { continue; }
+      if (!ev.session_id) continue;
+      hookStatus.set(ev.session_id, {
+        event: ev.event,
+        ts: ev.ts ? Date.parse(ev.ts) : Date.now(),
+        toolName: ev.tool_name || null,
+      });
+    }
+  } finally { await fh.close(); }
+}
+
+function deriveStatusForCode(sessionId, fallbackMtime) {
+  const h = hookStatus.get(sessionId);
+  if (h) {
+    const age = Date.now() - h.ts;
+    if (h.event === ATTENTION_EVENT) return 'needs_action';
+    if (h.event === 'SessionEnd') return 'finished';
+    if (TERMINAL_EVENTS.has(h.event)) return 'ready';
+    if (WORKING_EVENTS.has(h.event)) {
+      if (age < WORKING_TIMEOUT_MS) return 'working';
+      return 'ready';
+    }
+  }
+  // fallback: mtime
+  const age = Date.now() - fallbackMtime;
+  if (age < 60 * 1000) return 'working';
+  if (age < 24 * 60 * 60 * 1000) return 'ready';
+  return 'idle';
+}
+
+function deriveStatusForCowork(s) {
+  const age = Date.now() - s.lastEventTime;
+  if (age < 60 * 1000) return 'working';
+  if (age < 24 * 60 * 60 * 1000) return 'ready';
+  return 'idle';
+}
+
+// ============================================================================
+// snapshot aggregation
+// ============================================================================
 
 async function buildSnapshot() {
-  await readEventLogIncremental();
-  refreshAxIfStale();
-
-  const [meta, coworkMap] = await Promise.all([indexCodeMetadata(), scanCowork()]);
-  const axSessions = parseSidebarSessions(axCache.items || []);
+  await readHookLogIncremental();
+  const [codeMap, coworkMap] = await Promise.all([scanCode(), scanCowork()]);
 
   const next = new Map();
-  const seenIds = new Set([...eventsBySession.keys(), ...meta.keys()]);
+  for (const s of codeMap.values()) {
+    s.status = deriveStatusForCode(s.sessionId, s.mtime);
+    next.set(s.key, s);
+  }
+  for (const s of coworkMap.values()) {
+    s.status = deriveStatusForCowork(s);
+    next.set(s.key, s);
+  }
 
+  // Chat sessions from AX — only ones not already present in another kind
   const axByTitle = new Map();
-  for (const ax of axSessions) {
-    const key = ax.title.toLowerCase().slice(0, 60);
-    if (!axByTitle.has(key)) axByTitle.set(key, ax);
+  for (const ax of axCache.parsed || []) {
+    if (ax.kind !== 'chat' && ax.kind !== 'cowork' && ax.kind !== 'code') continue;
+    const k = ax.title.toLowerCase().slice(0, 60);
+    if (!axByTitle.has(k)) axByTitle.set(k, ax);
   }
-  function findAxByTitleSubstring(needle) {
-    if (!needle) return null;
-    const lower = needle.toLowerCase();
-    for (const [k, ax] of axByTitle) {
-      if (lower.startsWith(k) || k.startsWith(lower.slice(0, 30))) return ax;
-    }
-    return null;
-  }
-
-  for (const sessionId of seenIds) {
-    const events = eventsBySession.get(sessionId) || [];
-    const info = meta.get(sessionId) || {};
-    const derived = deriveSessionStatus(events);
-    const lastEventTime = Math.max(derived.lastEventTime || 0, info.mtime || 0);
-    if (lastEventTime === 0) continue;
-    if (Date.now() - lastEventTime > STALE_MS && derived.status !== 'needs_action') continue;
-    const hasHookData = events.length > 0;
-    const status = hasHookData ? derived.status : (info.jsonlStatus || 'idle');
-    let title = info.title || `Session ${sessionId.slice(0, 8)}…`;
-    const axMatch = findAxByTitleSubstring(info.title);
-    if (axMatch && axMatch.title.length > 3) title = axMatch.title;
-
-    next.set(`code:${sessionId}`, {
-      sessionId, kind: 'code', title,
-      project: info.project || null, cwd: info.cwd || null, gitBranch: info.gitBranch || null,
-      lastEventTime, status, hasHookData,
-    });
-  }
-
-  for (const [k, v] of coworkMap) next.set(k, v);
-
-  for (const ax of axSessions) {
-    if (ax.kind === 'unknown') continue;
-    let alreadyKnown = false;
+  // If AX surfaces a chat title, add it
+  for (const ax of axByTitle.values()) {
+    if (ax.kind !== 'chat') continue;
+    // dedup against existing sessions by title
+    let dupe = false;
     for (const v of next.values()) {
       if (v.title && v.title.toLowerCase().slice(0, 40) === ax.title.toLowerCase().slice(0, 40)) {
-        alreadyKnown = true; break;
+        dupe = true; break;
       }
     }
-    if (alreadyKnown) continue;
-    const axId = `ax:${ax.kind}:${ax.title.slice(0, 60)}`;
-    next.set(axId, {
-      sessionId: axId, kind: ax.kind, title: ax.title,
-      project: null, cwd: null, gitBranch: null,
-      lastEventTime: Date.now(), status: ax.status || 'ready',
-      hasHookData: false, fromAx: true,
+    if (dupe) continue;
+    const key = `chat:ax:${ax.title.toLowerCase().slice(0, 50).replace(/[^a-z0-9]+/g, '-')}`;
+    next.set(key, {
+      key,
+      kind: 'chat',
+      sessionId: key,
+      title: ax.title,
+      project: null,
+      cwd: null,
+      lastEventTime: Date.now(),
+      mtime: Date.now(),
+      status: 'idle',
+      fromAx: true,
     });
   }
 
   sessions.clear();
   for (const [k, v] of next) sessions.set(k, v);
+
   maybeBroadcast();
 }
 
-
 function snapshotArray() {
-  const order = { working: 0, needs_action: 1, ready: 2, idle: 3, unknown: 4, finished: 5 };
+  const order = { working: 0, needs_action: 1, ready: 2, idle: 3, finished: 4 };
   return Array.from(sessions.values()).sort((a, b) => {
-    const oa = order[a.status] ?? 99;
-    const ob = order[b.status] ?? 99;
+    const oa = order[a.status] ?? 99, ob = order[b.status] ?? 99;
     if (oa !== ob) return oa - ob;
     return b.lastEventTime - a.lastEventTime;
   });
@@ -568,126 +473,53 @@ function snapshotArray() {
 function currentPayload() {
   return {
     sessions: snapshotArray(),
-    hooksInstalled,
-    ax: { ok: !axCache.error, error: axCache.error || null, lastReadTs: axCache.ts || 0, itemCount: (axCache.items || []).length },
+    ax: {
+      ok: !axCache.error,
+      error: axCache.error || null,
+      message: axCache.message || null,
+      itemCount: (axCache.items || []).length,
+      sessionCount: (axCache.parsed || []).length,
+      lastReadTs: axCache.ts || 0,
+    },
   };
 }
 
 function maybeBroadcast() {
   const payload = currentPayload();
   const json = JSON.stringify(payload);
-  if (json === lastBroadcast) return;
-  lastBroadcast = json;
-  const data = `data: ${JSON.stringify({ type: 'snapshot', ...payload })}\n\n`;
-  for (const res of sseClients) {
-    try { res.write(data); } catch {}
-  }
+  if (json === lastSnapshotJson) return;
+  lastSnapshotJson = json;
+  const msg = `data: ${JSON.stringify({ type: 'snapshot', ...payload })}\n\n`;
+  for (const res of sseClients) { try { res.write(msg); } catch {} }
 }
 
-// ----- hook installation -----
-//
-// Writes the hook script into ~/.claude/dashboard/hook.py and registers it
-// in ~/.claude/settings.json for every relevant event. We back up the
-// existing settings.json before modifying.
+// ============================================================================
+// AppleScript open-session
+// ============================================================================
 
-async function checkHooksInstalled() {
-  try {
-    const settingsRaw = await readFile(SETTINGS_FILE, 'utf-8').catch(() => '{}');
-    const settings = JSON.parse(settingsRaw || '{}');
-    const startHooks = settings?.hooks?.SessionStart || [];
-    for (const matcher of startHooks) {
-      for (const hook of (matcher.hooks || [])) {
-        if (typeof hook.command === 'string' && hook.command.includes('dashboard/hook.py')) {
-          return true;
-        }
-      }
-    }
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-async function installHooks() {
-  // 1. copy hook script
-  await mkdir(HOOK_INSTALL_DIR, { recursive: true });
-  await copyFile(HOOK_SOURCE_PATH, HOOK_INSTALL_PATH);
-  // chmod 755
-  await import('node:fs').then(fs => fs.promises.chmod(HOOK_INSTALL_PATH, 0o755));
-
-  // 2. merge into settings.json
-  await mkdir(path.dirname(SETTINGS_FILE), { recursive: true });
-  let settings = {};
-  let backupPath = null;
-  try {
-    const raw = await readFile(SETTINGS_FILE, 'utf-8');
-    settings = JSON.parse(raw || '{}');
-    backupPath = `${SETTINGS_FILE}.dashboard-backup.${Date.now()}`;
-    await writeFile(backupPath, raw);
-  } catch {}
-
-  settings.hooks = settings.hooks || {};
-  for (const eventName of HOOK_EVENTS) {
-    settings.hooks[eventName] = settings.hooks[eventName] || [];
-    // remove any prior dashboard entry to keep this idempotent
-    settings.hooks[eventName] = settings.hooks[eventName].filter(matcher => {
-      return !(matcher.hooks || []).some(h => typeof h.command === 'string' && h.command.includes('dashboard/hook.py'));
-    });
-    settings.hooks[eventName].push({
-      hooks: [
-        {
-          type: 'command',
-          command: `/usr/bin/python3 ${HOOK_INSTALL_PATH} ${eventName}`,
-        },
-      ],
-    });
-  }
-
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n');
-  hooksInstalled = true;
-  return { ok: true, hookPath: HOOK_INSTALL_PATH, settingsPath: SETTINGS_FILE, backup: backupPath };
-}
-
-// ----- open session in Claude Desktop via Accessibility -----
-
-function openInDesktop(title) {
+function openSessionByTitle(title) {
   return new Promise((resolve) => {
-    const proc = spawn('osascript', [OPEN_APPLESCRIPT, title], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    if (!title) return resolve({ ok: false, error: 'no_title' });
+    const proc = spawn('osascript', [OPEN_SCRIPT, title], { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '', err = '';
+    let done = false;
+    const finish = (r) => { if (done) return; done = true; resolve(r); };
+    const t = setTimeout(() => { try { proc.kill(); } catch {} finish({ ok: false, error: 'timeout' }); }, 8000);
     proc.stdout.on('data', d => out += d.toString());
     proc.stderr.on('data', d => err += d.toString());
-    proc.on('close', code => {
-      resolve({ ok: code === 0 && out.startsWith('ok:'), out: out.trim(), err: err.trim(), exitCode: code });
+    proc.on('close', () => {
+      clearTimeout(t);
+      const trimmed = out.trim();
+      if (trimmed.startsWith('ok')) finish({ ok: true, message: trimmed });
+      else finish({ ok: false, error: trimmed || 'unknown', stderr: err.trim().slice(0, 300) });
     });
-    proc.on('error', e => resolve({ ok: false, out: '', err: e.message, exitCode: -1 }));
+    proc.on('error', e => { clearTimeout(t); finish({ ok: false, error: e.message }); });
   });
 }
 
-// ----- file watching for live updates -----
-
-function watchEventLog() {
-  // Tail the log: when it changes, re-read incrementally.
-  let timer = null;
-  const trigger = () => {
-    if (timer) return;
-    timer = setTimeout(async () => {
-      timer = null;
-      try { await buildSnapshot(); } catch {}
-    }, 150);
-  };
-  try {
-    watch(path.dirname(EVENTS_LOG), { persistent: true }, (_evt, filename) => {
-      if (filename === path.basename(EVENTS_LOG)) trigger();
-    });
-  } catch {}
-  // also a periodic refresh in case fs.watch misses something (or for mtime
-  // changes on Code JSONL files)
-  setInterval(trigger, 4000);
-}
-
-// ----- HTTP server -----
+// ============================================================================
+// HTTP server
+// ============================================================================
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -700,24 +532,18 @@ async function serveStatic(res, filePath) {
   try {
     const data = await readFile(filePath);
     const ext = path.extname(filePath).toLowerCase();
-    res.writeHead(200, {
-      'content-type': MIME[ext] || 'application/octet-stream',
-      'cache-control': 'no-cache',
-    });
+    res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream', 'cache-control': 'no-cache' });
     res.end(data);
   } catch {
     res.writeHead(404).end('not found');
   }
 }
 
-async function readJson(req) {
+function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     req.on('data', c => chunks.push(c));
-    req.on('end', () => {
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}')); }
-      catch (e) { reject(e); }
-    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
     req.on('error', reject);
   });
 }
@@ -727,34 +553,16 @@ const server = createServer(async (req, res) => {
   res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
   res.setHeader('access-control-allow-headers', 'content-type');
   if (req.method === 'OPTIONS') { res.writeHead(204).end(); return; }
+
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  if (url.pathname === '/api/sessions') {
+  if (url.pathname === '/api/sessions' && req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' });
     res.end(JSON.stringify(currentPayload()));
     return;
   }
 
-  if (url.pathname === '/api/debug/ax' && req.method === 'GET') {
-    try {
-      axCache.ts = 0;
-      await refreshAxIfStale();
-      const sessions = parseSidebarSessions(axCache.items || []);
-      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({
-        error: axCache.error || null,
-        rawItemCount: (axCache.items || []).length,
-        identifiedSessions: sessions.map(s => ({ kind: s.kind, title: s.title, role: s.role, status: s.status })),
-        rawSample: (axCache.items || []).slice(0, 200),
-      }, null, 2));
-    } catch (e) {
-      res.writeHead(500, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-    return;
-  }
-
-  if (url.pathname === '/api/events') {
+  if (url.pathname === '/api/events' && req.method === 'GET') {
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -766,32 +574,34 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  if (url.pathname === '/api/install-hooks' && req.method === 'POST') {
+  if (url.pathname === '/api/open' && req.method === 'POST') {
     try {
-      const result = await installHooks();
-      res.writeHead(200, { 'content-type': 'application/json' });
+      const body = JSON.parse(await readBody(req));
+      const result = await openSessionByTitle(body.title);
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(result));
     } catch (e) {
-      res.writeHead(500, { 'content-type': 'application/json' });
+      res.writeHead(400, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: e.message }));
     }
     return;
   }
 
-  if (url.pathname === '/api/open' && req.method === 'POST') {
+  if (url.pathname === '/api/debug/ax' && req.method === 'GET') {
     try {
-      const body = await readJson(req);
-      if (!body.title) {
-        res.writeHead(400, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ ok: false, error: 'title required' }));
-        return;
-      }
-      const result = await openInDesktop(body.title);
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(result));
+      axCache.ts = 0;
+      await refreshAxCache();
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        error: axCache.error || null,
+        message: axCache.message || null,
+        rawItemCount: (axCache.items || []).length,
+        identifiedSessions: axCache.parsed || [],
+        rawSample: (axCache.items || []).slice(0, 200),
+      }, null, 2));
     } catch (e) {
       res.writeHead(500, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: false, error: e.message }));
+      res.end(JSON.stringify({ error: e.message }));
     }
     return;
   }
@@ -804,30 +614,43 @@ const server = createServer(async (req, res) => {
   res.writeHead(404).end('not found');
 });
 
-// ----- main -----
+// ============================================================================
+// main
+// ============================================================================
 
 (async () => {
-  console.log('[sidecar] starting…');
-  hooksInstalled = await checkHooksInstalled();
-
+  console.log('[sidecar] starting...');
   if (!(await safeStat(PROJECTS_DIR))) {
-    console.warn(`[sidecar] note: ${PROJECTS_DIR} not found — fine if you haven't used Claude Code yet.`);
+    console.error(`[sidecar] ${PROJECTS_DIR} not found — have you run Claude Code at least once?`);
+    process.exit(1);
   }
+  // initial hook log position: start of file (read everything once)
+  const st = await safeStat(HOOK_LOG);
+  hookLogOffset = 0;
+  if (st) await readHookLogIncremental();
 
-  await refreshAxIfStale();
+  await refreshAxCache();
   await buildSnapshot();
 
-  watchEventLog();
+  // Watch hook log for incremental updates
+  if (st) {
+    try {
+      watch(HOOK_LOG, async () => {
+        await readHookLogIncremental();
+        await buildSnapshot();
+      });
+    } catch (e) { console.warn('[sidecar] hook log watch failed:', e.message); }
+  }
 
-  setInterval(async () => {
-    await refreshAxIfStale();
-    try { await buildSnapshot(); } catch {}
-  }, AX_REFRESH_MS);
+  setInterval(buildSnapshot, POLL_MS);
+  setInterval(async () => { await refreshAxCache(); await buildSnapshot(); }, AX_POLL_MS);
 
   server.listen(PORT, '127.0.0.1', () => {
+    const counts = { code: 0, cowork: 0, chat: 0 };
+    for (const s of sessions.values()) counts[s.kind] = (counts[s.kind] || 0) + 1;
     console.log(`[sidecar] ready → http://localhost:${PORT}/`);
-    console.log(`[sidecar]   hooks installed: ${hooksInstalled ? 'yes' : 'no — click "Installer les hooks" in the dashboard'}`);
-    console.log(`[sidecar]   ax read:         ${axCache.error ? 'failed (' + axCache.error + ')' : 'ok (' + (axCache.items?.length || 0) + ' items)'}`);
-    console.log(`[sidecar]   tracking ${sessions.size} session(s)`);
+    console.log(`[sidecar]   code: ${counts.code}, cowork: ${counts.cowork}, chat: ${counts.chat}`);
+    console.log(`[sidecar]   ax: ${axCache.error ? 'failed (' + axCache.error + ')' : 'ok (' + (axCache.items?.length || 0) + ' items)'}`);
+    console.log(`[sidecar]   hook events tracked: ${hookStatus.size}`);
   });
 })();
