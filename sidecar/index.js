@@ -40,8 +40,9 @@ const READ_AX_SCRIPT  = path.join(__dirname, 'applescript', 'read-claude-sidebar
 const PORT = parseInt(process.env.PORT || '8765', 10);
 
 const POLL_MS           = 3000;
-const AX_POLL_MS        = 12000;
-const AX_TIMEOUT_MS     = 25000;
+const AX_POLL_MS        = 30000;     // poll rarely — AX on Electron is expensive
+const AX_TIMEOUT_MS     = 18000;     // macOS hard-kills osascript around 20-25s
+const AX_ENABLED        = process.env.DASHBOARD_AX !== '0'; // set DASHBOARD_AX=0 to disable
 const CODE_RECENT_MS    = 7 * 24 * 60 * 60 * 1000;
 const COWORK_RECENT_MS  = 30 * 24 * 60 * 60 * 1000;
 const COWORK_CAP        = 100;
@@ -264,6 +265,7 @@ async function scanCowork() {
 let axInFlight = null;
 function runAxRead() {
   if (process.platform !== 'darwin') return Promise.resolve({ error: 'not_darwin', items: [] });
+  if (!AX_ENABLED) return Promise.resolve({ error: 'disabled', message: 'Set DASHBOARD_AX=1 to enable', items: [] });
   if (axInFlight) return axInFlight;
   axInFlight = new Promise((resolve) => {
     const proc = spawn('osascript', [READ_AX_SCRIPT], { stdio: ['ignore', 'pipe', 'pipe'] });

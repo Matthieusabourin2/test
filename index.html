@@ -373,6 +373,11 @@
         return;
       }
       axBanner.className = 'banner warn';
+      if (ax.error === 'disabled') {
+        axBanner.className = 'banner';
+        axBanner.innerHTML = `Lecture de la sidebar Claude Desktop désactivée. Pour l'activer (Chat sessions), relance le sidecar avec <code>DASHBOARD_AX=1 node index.js</code> — attention, AX sur Electron est très lent (10-20s par lecture).`;
+        return;
+      }
       if (ax.error === 'no_permission' || ax.error === 'parse_failed' || ax.error === 'spawn_failed' || ax.error === 'exception') {
         axBanner.innerHTML = `
           <strong>Permission Accessibility manquante</strong> pour le terminal qui lance le sidecar.
