@@ -36,12 +36,15 @@ const HOOK_INSTALL_DIR = path.join(HOME, '.claude', 'dashboard');
 const HOOK_INSTALL_PATH = path.join(HOOK_INSTALL_DIR, 'hook.py');
 const HOOK_SOURCE_PATH = path.resolve(REPO_ROOT, 'hooks', 'dashboard-event.py');
 const OPEN_APPLESCRIPT = path.join(__dirname, 'applescript', 'open-session.applescript');
+const READ_SIDEBAR_JS = path.join(__dirname, 'applescript', 'read-sidebar.js');
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
 
 // Status timing
 const STALE_MS = 24 * 60 * 60 * 1000;        // session disappears after 24h idle
 const WORKING_TIMEOUT_MS = 10 * 60 * 1000;   // if no Stop event after 10min, assume hung
+const AX_REFRESH_MS = 8 * 1000;              // re-read Claude Desktop sidebar every 8s
+const AX_TIMEOUT_MS = 6 * 1000;              // osascript ax dump timeout
 
 // Hook events we wire up
 const HOOK_EVENTS = [
@@ -384,53 +387,173 @@ async function scanCowork() {
   return out;
 }
 
+
+// ----- Claude Desktop sidebar reader (macOS Accessibility) -----
+
+let axCache = { items: [], error: null, ts: 0 };
+let axInFlight = null;
+
+function runAxRead() {
+  if (process.platform !== 'darwin') {
+    return Promise.resolve({ error: 'not_darwin', items: [] });
+  }
+  if (axInFlight) return axInFlight;
+
+  axInFlight = new Promise((resolve) => {
+    const proc = spawn('osascript', [READ_SIDEBAR_JS], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    let done = false;
+    const finish = (result) => { if (done) return; done = true; axInFlight = null; resolve(result); };
+    const timer = setTimeout(() => { try { proc.kill(); } catch {} finish({ error: 'timeout', items: [] }); }, AX_TIMEOUT_MS);
+    proc.stdout.on('data', d => out += d.toString());
+    proc.stderr.on('data', d => err += d.toString());
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const parsed = JSON.parse(out.trim());
+        if (parsed.error) finish({ error: parsed.error, message: parsed.message, items: [] });
+        else finish({ items: parsed.items || [], truncated: !!parsed.truncated });
+      } catch (e) {
+        finish({ error: 'parse_failed', stderr: err.trim().slice(0, 200), items: [] });
+      }
+    });
+    proc.on('error', e => { clearTimeout(timer); finish({ error: 'spawn_failed', message: e.message, items: [] }); });
+  });
+  return axInFlight;
+}
+
+async function refreshAxIfStale() {
+  if (Date.now() - axCache.ts < AX_REFRESH_MS) return;
+  try {
+    const res = await runAxRead();
+    axCache = { ...res, ts: Date.now() };
+    if (res.error) {
+      if (axCache.lastLoggedError !== res.error) {
+        console.warn(`[sidecar] AX read: ${res.error}${res.message ? ' — ' + res.message : ''}`);
+        axCache.lastLoggedError = res.error;
+      }
+    } else if (axCache.lastLoggedError) {
+      console.log('[sidecar] AX read: recovered');
+      axCache.lastLoggedError = null;
+    }
+  } catch {}
+}
+
+function parseSidebarSessions(items) {
+  if (!items || !items.length) return [];
+  const sorted = items.slice();
+  const sections = [];
+  const SECTION_PATTERNS = [
+    { name: 'chat',   re: /^(chat|chats|previous chats|recent chats|conversations?)$/i },
+    { name: 'cowork', re: /^cowork(\s|s)?$/i },
+    { name: 'code',   re: /^code(\s|s)?$/i },
+    { name: 'recent', re: /^(recents?|today|yesterday|this week|earlier)$/i },
+  ];
+  for (let i = 0; i < sorted.length; i++) {
+    const it = sorted[i];
+    const t = (it.t || '').trim();
+    for (const sp of SECTION_PATTERNS) {
+      if (sp.re.test(t)) { sections.push({ name: sp.name, atIndex: i }); break; }
+    }
+  }
+  const NOT_A_SESSION = /^(new chat|new code|new cowork|new project|settings|search|account|sign in|sign out|share|export|delete|cancel|ok|close|claude|home|menu|filter|sort|today|yesterday|this week|earlier|previous|loading|untitled)$/i;
+  const SESSION_ROLES = new Set(['AXButton', 'AXRow', 'AXStaticText', 'AXCell', 'AXMenuItem', 'AXLink']);
+  const candidates = [];
+  const seen = new Set();
+  for (let i = 0; i < sorted.length; i++) {
+    const it = sorted[i];
+    const t = (it.t || '').trim();
+    if (!t || t.length < 2 || t.length > 200) continue;
+    if (NOT_A_SESSION.test(t)) continue;
+    if (!SESSION_ROLES.has(it.r) && it.r !== '?') continue;
+    let section = 'unknown';
+    for (let j = sections.length - 1; j >= 0; j--) {
+      if (sections[j].atIndex < i) { section = sections[j].name; break; }
+    }
+    if (section === 'recent') section = 'chat';
+    const dedupKey = `${section}:${t.toLowerCase()}`;
+    if (seen.has(dedupKey)) continue;
+    seen.add(dedupKey);
+    const blob = `${it.desc || ''} ${it.h || ''} ${it.v || ''}`.toLowerCase();
+    let status = 'ready';
+    if (/running|working|in progress|generating/.test(blob)) status = 'working';
+    else if (/needs|waiting|attention|action|unread/.test(blob)) status = 'needs_action';
+    candidates.push({ kind: section, title: t, status, role: it.r, raw: it });
+  }
+  return candidates;
+}
+
 // ----- aggregate snapshot -----
 
 async function buildSnapshot() {
   await readEventLogIncremental();
+  refreshAxIfStale();
+
   const [meta, coworkMap] = await Promise.all([indexCodeMetadata(), scanCowork()]);
+  const axSessions = parseSidebarSessions(axCache.items || []);
 
   const next = new Map();
   const seenIds = new Set([...eventsBySession.keys(), ...meta.keys()]);
+
+  const axByTitle = new Map();
+  for (const ax of axSessions) {
+    const key = ax.title.toLowerCase().slice(0, 60);
+    if (!axByTitle.has(key)) axByTitle.set(key, ax);
+  }
+  function findAxByTitleSubstring(needle) {
+    if (!needle) return null;
+    const lower = needle.toLowerCase();
+    for (const [k, ax] of axByTitle) {
+      if (lower.startsWith(k) || k.startsWith(lower.slice(0, 30))) return ax;
+    }
+    return null;
+  }
 
   for (const sessionId of seenIds) {
     const events = eventsBySession.get(sessionId) || [];
     const info = meta.get(sessionId) || {};
     const derived = deriveSessionStatus(events);
     const lastEventTime = Math.max(derived.lastEventTime || 0, info.mtime || 0);
-
-    // Drop sessions with no recent activity at all
     if (lastEventTime === 0) continue;
     if (Date.now() - lastEventTime > STALE_MS && derived.status !== 'needs_action') continue;
-
-    // Choose the most informative status we have:
-    //   1. Hook data is authoritative when available.
-    //   2. Otherwise fall back to the JSONL-derived status (working / ready /
-    //      needs_action / idle from the file content).
     const hasHookData = events.length > 0;
     const status = hasHookData ? derived.status : (info.jsonlStatus || 'idle');
+    let title = info.title || `Session ${sessionId.slice(0, 8)}…`;
+    const axMatch = findAxByTitleSubstring(info.title);
+    if (axMatch && axMatch.title.length > 3) title = axMatch.title;
 
     next.set(`code:${sessionId}`, {
-      sessionId,
-      kind: 'code',
-      title: info.title || `Session ${sessionId.slice(0, 8)}…`,
-      project: info.project || null,
-      cwd: info.cwd || null,
-      gitBranch: info.gitBranch || null,
-      lastEventTime,
-      status,
-      hasHookData,
+      sessionId, kind: 'code', title,
+      project: info.project || null, cwd: info.cwd || null, gitBranch: info.gitBranch || null,
+      lastEventTime, status, hasHookData,
     });
   }
 
-  // merge Cowork sessions
   for (const [k, v] of coworkMap) next.set(k, v);
+
+  for (const ax of axSessions) {
+    if (ax.kind === 'unknown') continue;
+    let alreadyKnown = false;
+    for (const v of next.values()) {
+      if (v.title && v.title.toLowerCase().slice(0, 40) === ax.title.toLowerCase().slice(0, 40)) {
+        alreadyKnown = true; break;
+      }
+    }
+    if (alreadyKnown) continue;
+    const axId = `ax:${ax.kind}:${ax.title.slice(0, 60)}`;
+    next.set(axId, {
+      sessionId: axId, kind: ax.kind, title: ax.title,
+      project: null, cwd: null, gitBranch: null,
+      lastEventTime: Date.now(), status: ax.status || 'ready',
+      hasHookData: false, fromAx: true,
+    });
+  }
 
   sessions.clear();
   for (const [k, v] of next) sessions.set(k, v);
-
   maybeBroadcast();
 }
+
 
 function snapshotArray() {
   const order = { working: 0, needs_action: 1, ready: 2, idle: 3, unknown: 4, finished: 5 };
@@ -442,9 +565,16 @@ function snapshotArray() {
   });
 }
 
+function currentPayload() {
+  return {
+    sessions: snapshotArray(),
+    hooksInstalled,
+    ax: { ok: !axCache.error, error: axCache.error || null, lastReadTs: axCache.ts || 0, itemCount: (axCache.items || []).length },
+  };
+}
+
 function maybeBroadcast() {
-  const sessionsArr = snapshotArray();
-  const payload = { sessions: sessionsArr, hooksInstalled };
+  const payload = currentPayload();
   const json = JSON.stringify(payload);
   if (json === lastBroadcast) return;
   lastBroadcast = json;
@@ -601,7 +731,26 @@ const server = createServer(async (req, res) => {
 
   if (url.pathname === '/api/sessions') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' });
-    res.end(JSON.stringify({ sessions: snapshotArray(), hooksInstalled }));
+    res.end(JSON.stringify(currentPayload()));
+    return;
+  }
+
+  if (url.pathname === '/api/debug/ax' && req.method === 'GET') {
+    try {
+      axCache.ts = 0;
+      await refreshAxIfStale();
+      const sessions = parseSidebarSessions(axCache.items || []);
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        error: axCache.error || null,
+        rawItemCount: (axCache.items || []).length,
+        identifiedSessions: sessions.map(s => ({ kind: s.kind, title: s.title, role: s.role, status: s.status })),
+        rawSample: (axCache.items || []).slice(0, 200),
+      }, null, 2));
+    } catch (e) {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 
@@ -611,7 +760,7 @@ const server = createServer(async (req, res) => {
       'cache-control': 'no-cache',
       'connection': 'keep-alive',
     });
-    res.write(`data: ${JSON.stringify({ type: 'snapshot', sessions: snapshotArray(), hooksInstalled })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'snapshot', ...currentPayload() })}\n\n`);
     sseClients.add(res);
     req.on('close', () => sseClients.delete(res));
     return;
@@ -665,14 +814,20 @@ const server = createServer(async (req, res) => {
     console.warn(`[sidecar] note: ${PROJECTS_DIR} not found — fine if you haven't used Claude Code yet.`);
   }
 
-  // Initial scan
+  await refreshAxIfStale();
   await buildSnapshot();
 
   watchEventLog();
 
+  setInterval(async () => {
+    await refreshAxIfStale();
+    try { await buildSnapshot(); } catch {}
+  }, AX_REFRESH_MS);
+
   server.listen(PORT, '127.0.0.1', () => {
     console.log(`[sidecar] ready → http://localhost:${PORT}/`);
     console.log(`[sidecar]   hooks installed: ${hooksInstalled ? 'yes' : 'no — click "Installer les hooks" in the dashboard'}`);
+    console.log(`[sidecar]   ax read:         ${axCache.error ? 'failed (' + axCache.error + ')' : 'ok (' + (axCache.items?.length || 0) + ' items)'}`);
     console.log(`[sidecar]   tracking ${sessions.size} session(s)`);
   });
 })();

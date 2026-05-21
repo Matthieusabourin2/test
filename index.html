@@ -217,6 +217,16 @@
     }
     .session-kind.code   { background: rgba(37,99,235,0.15);  color: #2563eb; }
     .session-kind.cowork { background: rgba(168,85,247,0.15); color: #9333ea; }
+    .session-kind.chat   { background: rgba(234,88,12,0.15);  color: #ea580c; }
+    .session.from-ax .session-title { font-style: italic; }
+    .ax-banner { background: rgba(122,162,247,0.10); border: 1px solid var(--accent-2); color: var(--text); padding: 10px 12px; border-radius: var(--radius); margin-bottom: 12px; font-size: 0.85rem; }
+    .ax-banner.warn { background: rgba(180,83,9,0.10); border-color: var(--needs-action); }
+    .ax-banner code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+    .ax-banner a { color: var(--accent-2); }
+    .ax-status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+    .ax-status-dot.ok { background: var(--ready); }
+    .ax-status-dot.warn { background: var(--needs-action); }
+    .ax-status-dot.error { background: var(--danger); }
     .session.linked .session-title::before {
       content: "📌 ";
       font-size: 0.85em;
@@ -305,8 +315,10 @@
 
     <section class="sessions-panel">
       <div class="sessions-header">
-        <h2>Sessions Claude Code <span class="count" id="sessions-count"></span></h2>
+        <h2>Sessions Claude <span class="count" id="sessions-count"></span></h2>
+        <span class="hint"><span id="ax-status-line">…</span></span>
       </div>
+      <div id="ax-banner" class="ax-banner" style="display:none"></div>
       <div class="status-tabs" id="status-tabs"></div>
       <div id="sessions-list" class="sessions-list"></div>
     </section>
@@ -690,7 +702,7 @@
                 <div>${escapeHtml(s.title || s.sessionId.slice(0,8) + '…')}</div>
                 <div class="hint">${escapeHtml(s.project || '')} · ${escapeHtml(STATUS_LABEL[s.status] || s.status)}</div>
               </div>
-              <span class="session-when">${relTime(s.lastEventTime)}</span>
+              <span class="session-when">${s.fromAx ? '' : relTime(s.lastEventTime)}</span>
             </div>
           `).join('');
         linkPickerList.querySelectorAll('.link-picker-item').forEach(el => {
@@ -792,7 +804,9 @@
     let liveSessions = [];
     let sidecarAlive = false;
     let hooksInstalled = false;
-    let currentFilter = 'active'; // 'active' = working+needs_action+ready / 'all'
+    let axInfo = { ok: false, error: null, itemCount: 0 };
+    let currentFilter = 'active';
+    let currentKindFilter = 'all';
 
     function renderSidecarMissing() {
       sessionsCountEl.textContent = '';
@@ -848,25 +862,62 @@
       return `${Math.round(h / 24)}j`;
     }
 
+    function renderAxBanner() {
+      const el = document.getElementById('ax-banner');
+      const statusEl = document.getElementById('ax-status-line');
+      if (!sidecarAlive) { el.style.display = 'none'; statusEl.textContent = ''; return; }
+      const ok = axInfo.ok, err = axInfo.error;
+      let dotClass = 'ok', label = `AX ok (${axInfo.itemCount} éléments lus)`;
+      if (!ok && err === 'claude_not_running') { dotClass = 'warn'; label = 'Claude Desktop non lancé — Chat/Cowork via AX indisponible'; }
+      else if (!ok && err) { dotClass = 'error'; label = `Accessibilité KO (${err})`; }
+      statusEl.innerHTML = `<span class="ax-status-dot ${dotClass}"></span>${escapeHtml(label)}`;
+      if (ok || err === 'claude_not_running' || err === 'not_darwin') { el.style.display = 'none'; return; }
+      el.className = 'ax-banner warn';
+      el.style.display = 'block';
+      if (err === 'parse_failed' || err === 'spawn_failed' || err === 'exception' || err === 'no_permission') {
+        el.innerHTML = `<strong>Permission Accessibilité manquante.</strong> Va dans <code>Réglages Système → Confidentialité et sécurité → Accessibilité</code> et coche la case du terminal qui exécute le sidecar (Terminal/iTerm/Warp). Puis relance <code>node index.js</code>. Diagnostic : <a href="${SIDECAR_BASE}/api/debug/ax" target="_blank">/api/debug/ax</a>`;
+      } else if (err === 'timeout') {
+        el.innerHTML = `Lecture AX timeout — Claude Desktop occupé. Réessai automatique.`;
+      } else {
+        el.innerHTML = `AX indisponible (${escapeHtml(err)}). <a href="${SIDECAR_BASE}/api/debug/ax" target="_blank">Diagnostic</a>`;
+      }
+    }
+
     function renderSessions() {
       if (!sidecarAlive) return;
       renderSetupBanner();
+      renderAxBanner();
 
       const counts = {};
-      for (const s of liveSessions) counts[s.status] = (counts[s.status] || 0) + 1;
+      const kindCounts = {};
+      for (const s of liveSessions) {
+        counts[s.status] = (counts[s.status] || 0) + 1;
+        kindCounts[s.kind || 'unknown'] = (kindCounts[s.kind || 'unknown'] || 0) + 1;
+      }
 
       const tabsEl = document.getElementById('status-tabs');
       const activeCount = (counts.working || 0) + (counts.needs_action || 0) + (counts.ready || 0);
+      const kindTab = (k, label) => {
+        const c = kindCounts[k] || 0;
+        if (c === 0 && k !== 'all') return '';
+        const total = k === 'all' ? liveSessions.length : c;
+        return `<button class="status-tab ${currentKindFilter === k ? 'active' : ''}" data-kind="${k}">${label} · ${total}</button>`;
+      };
       tabsEl.innerHTML = `
-        <button class="status-tab ${currentFilter === 'active' ? 'active' : ''}" data-filter="active">
-          Actifs · ${activeCount}
-        </button>
-        <button class="status-tab ${currentFilter === 'all' ? 'active' : ''}" data-filter="all">
-          Tout · ${liveSessions.length}
-        </button>
+        <button class="status-tab ${currentFilter === 'active' ? 'active' : ''}" data-filter="active">Actifs · ${activeCount}</button>
+        <button class="status-tab ${currentFilter === 'all' ? 'active' : ''}" data-filter="all">Tout · ${liveSessions.length}</button>
+        <span style="width:8px"></span>
+        ${kindTab('all', 'Tous types')}
+        ${kindTab('code', 'Code')}
+        ${kindTab('cowork', 'Cowork')}
+        ${kindTab('chat', 'Chat')}
       `;
       tabsEl.querySelectorAll('.status-tab').forEach(b => {
-        b.addEventListener('click', () => { currentFilter = b.dataset.filter; renderSessions(); });
+        b.addEventListener('click', () => {
+          if (b.dataset.filter) currentFilter = b.dataset.filter;
+          if (b.dataset.kind) currentKindFilter = b.dataset.kind;
+          renderSessions();
+        });
       });
 
       const parts = [];
@@ -875,9 +926,10 @@
       }
       sessionsCountEl.textContent = parts.join(' · ');
 
-      const visible = currentFilter === 'all'
+      let visible = currentFilter === 'all'
         ? liveSessions
         : liveSessions.filter(s => ['working','needs_action','ready'].includes(s.status));
+      if (currentKindFilter !== 'all') visible = visible.filter(s => s.kind === currentKindFilter);
 
       if (!visible.length) {
         sessionsListEl.innerHTML = `<div class="sidecar-banner">Aucune session dans cette catégorie.</div>`;
@@ -888,17 +940,17 @@
       const linkedIds = new Set(tasks.map(t => t.linkedSessionId).filter(Boolean));
 
       sessionsListEl.innerHTML = visible.map(s => `
-        <div class="session ${s.status} ${linkedIds.has(s.sessionId) ? 'linked' : ''}"
+        <div class="session ${s.status} ${linkedIds.has(s.sessionId) ? 'linked' : ''} ${s.fromAx ? 'from-ax' : ''}"
              data-title="${escapeHtml(s.title || '')}"
              data-session-id="${escapeHtml(s.sessionId)}"
-             title="${escapeHtml(STATUS_LABEL[s.status] || s.status)} — clic pour ouvrir dans Claude Desktop">
+             title="${escapeHtml(STATUS_LABEL[s.status] || s.status)}${s.fromAx ? ' — depuis AX' : ''} — clic pour ouvrir dans Claude Desktop">
           <span class="dot ${s.status}"></span>
           <div class="session-title">
             ${s.kind ? `<span class="session-kind ${s.kind}">${escapeHtml(s.kind)}</span>` : ''}
             ${escapeHtml(s.title || s.sessionId.slice(0, 8) + '…')}
             ${s.project ? `<span class="session-project">${escapeHtml(s.project)}</span>` : ''}
           </div>
-          <span class="session-when">${relTime(s.lastEventTime)}</span>
+          <span class="session-when">${s.fromAx ? '' : relTime(s.lastEventTime)}</span>
           <button class="btn session-link-btn" data-action="link-session">🔗 lier</button>
         </div>
       `).join('');
@@ -947,17 +999,20 @@
       }
     }
 
+    function applyPayload(data) {
+      sidecarAlive = true;
+      liveSessions = data.sessions || [];
+      hooksInstalled = !!data.hooksInstalled;
+      axInfo = data.ax || { ok: false, error: null, itemCount: 0 };
+      renderSessions();
+      render();
+    }
+
     async function pollSessions() {
       try {
         const r = await fetch(`${SIDECAR_BASE}/api/sessions`, { cache: 'no-store' });
         if (!r.ok) throw new Error();
-        const data = await r.json();
-        sidecarAlive = true;
-        liveSessions = data.sessions || [];
-        hooksInstalled = !!data.hooksInstalled;
-        renderSessions();
-        // re-render kanban so linked-session badges stay fresh
-        render();
+        applyPayload(await r.json());
       } catch {
         if (sidecarAlive || liveSessions.length === 0) {
           sidecarAlive = false;
@@ -972,13 +1027,7 @@
         es.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data);
-            if (msg.type === 'snapshot') {
-              sidecarAlive = true;
-              liveSessions = msg.sessions || [];
-              hooksInstalled = !!msg.hooksInstalled;
-              renderSessions();
-              render();
-            }
+            if (msg.type === 'snapshot') applyPayload(msg);
           } catch {}
         };
         es.onerror = () => { /* browser auto-reconnects */ };
