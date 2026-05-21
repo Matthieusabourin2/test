@@ -40,8 +40,8 @@ const READ_AX_SCRIPT  = path.join(__dirname, 'applescript', 'read-claude-sidebar
 const PORT = parseInt(process.env.PORT || '8765', 10);
 
 const POLL_MS           = 3000;
-const AX_POLL_MS        = 8000;
-const AX_TIMEOUT_MS     = 6000;
+const AX_POLL_MS        = 12000;
+const AX_TIMEOUT_MS     = 25000;
 const CODE_RECENT_MS    = 7 * 24 * 60 * 60 * 1000;
 const COWORK_RECENT_MS  = 30 * 24 * 60 * 60 * 1000;
 const COWORK_CAP        = 100;
@@ -504,7 +504,7 @@ function openSessionByTitle(title) {
     let out = '', err = '';
     let done = false;
     const finish = (r) => { if (done) return; done = true; resolve(r); };
-    const t = setTimeout(() => { try { proc.kill(); } catch {} finish({ ok: false, error: 'timeout' }); }, 8000);
+    const t = setTimeout(() => { try { proc.kill(); } catch {} finish({ ok: false, error: 'timeout' }); }, 25000);
     proc.stdout.on('data', d => out += d.toString());
     proc.stderr.on('data', d => err += d.toString());
     proc.on('close', () => {

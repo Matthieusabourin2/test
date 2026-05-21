@@ -23,7 +23,7 @@ function run(argv) {
 
     if (winCount === 0) return JSON.stringify({ error: 'no_windows' });
 
-    const maxNodes = parseInt(argv[0] || '4000', 10);
+    const maxNodes = parseInt(argv[0] || '2500', 10);
     const collected = [];
     let nodeCount = 0;
 
