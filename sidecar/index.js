@@ -1,47 +1,70 @@
 #!/usr/bin/env node
 // Claude Dashboard sidecar
 //
-// Scans ~/.claude/projects/**/*.jsonl on a 2s interval, derives a per-session
-// status mirroring Claude Code's sidebar semantics, and pushes updates over SSE.
-// Zero npm dependencies — Node standard library only.
+// Surfaces Claude Code, Claude Cowork, and (best-effort) Claude Chat sessions
+// from local disk state so the dashboard can show one unified, live view.
+//
+// Layout:
+//   - scanCode()     reads ~/.claude/projects/**/*.jsonl
+//   - scanCowork()   reads ~/Library/Application Support/Claude/
+//                          local-agent-mode-sessions/<account>/<session>/*.json
+//   - scanDesktopState() reads Claude Desktop's shared_proto_db (LevelDB) for
+//                          per-session lastViewedAt timestamps. The DB is
+//                          held under an exclusive lock while Claude Desktop
+//                          is running, so we copy it to /tmp before opening.
+//   - scanChat()     same idea for IndexedDB (Chromium claude.ai cache).
+//                    Keys are LevelDB-readable but values are encoded with
+//                    Blink's structured-clone format; we only pull what we
+//                    can recognize textually for now.
+//
+// All scanners feed the same in-memory sessions Map. The HTTP server exposes
+// snapshots over /api/sessions and pushes diffs over /api/events (SSE).
 
 import { createServer } from 'node:http';
-import { readFile, readdir, stat } from 'node:fs/promises';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
-import { homedir } from 'node:os';
+import { readFile, readdir, stat, mkdir, cp, rm } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const execP = promisify(exec);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '..');
-const PROJECTS_DIR = path.join(homedir(), '.claude', 'projects');
+let ClassicLevel = null;
+try {
+  ({ ClassicLevel } = await import('classic-level'));
+} catch {
+  console.warn('[sidecar] classic-level not installed — Chat and Desktop state will be skipped.');
+  console.warn('[sidecar]   run `npm install` inside the sidecar/ directory to enable them.');
+}
+
+const __dirname  = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT  = path.resolve(__dirname, '..');
+const HOME       = homedir();
+const PROJECTS_DIR     = path.join(HOME, '.claude', 'projects');
+const APP_SUPPORT_DIR  = path.join(HOME, 'Library', 'Application Support', 'Claude');
+const COWORK_DIR       = path.join(APP_SUPPORT_DIR, 'local-agent-mode-sessions');
+const SHARED_DB_DIR    = path.join(APP_SUPPORT_DIR, 'shared_proto_db');
+const INDEXEDDB_DIR    = path.join(APP_SUPPORT_DIR, 'IndexedDB', 'https_claude.ai_0.indexeddb.leveldb');
+const SNAPSHOT_TMP     = path.join(tmpdir(), 'claude-dashboard-leveldb');
+
 const PORT = parseInt(process.env.PORT || '8765', 10);
 
-// Status thresholds aligned with Claude Code's own sidebar:
-//   blue pulse    = actively writing right now
-//   green pulse   = finished, unread (atime <= mtime: file hasn't been opened since
-//                   the last assistant write)
-//   green solid   = finished, read (atime > mtime: user opened the session)
-//   red pulse     = stuck on a tool_use for > NEEDS_ACTION_MS, likely a permission
-//                   prompt or other blocked-on-user state
-//   gray (idle)   = > 24h with no activity, displayed dimmed
-const VERY_RECENT_MS   = 60 * 1000;
-const NEEDS_ACTION_MS  = 5 * 60 * 1000;
-const IDLE_MS          = 24 * 60 * 60 * 1000;       // grayed after 24h
-const HIDDEN_MS        = 7 * 24 * 60 * 60 * 1000;   // dropped after 7d
-const POLL_INTERVAL_MS = 2000;
-const GIT_POLL_MS      = 30000;
-const TAIL_BYTES       = 32 * 1024;
-const HEAD_BYTES       = 8 * 1024;
+const VERY_RECENT_MS = 60 * 1000;
+const IDLE_MS        = 24 * 60 * 60 * 1000;
+const HIDDEN_MS      = 7 * 24 * 60 * 60 * 1000;
+const POLL_INTERVAL_MS = 3000;
+const LEVELDB_POLL_MS  = 15000;
+const TAIL_BYTES = 32 * 1024;
+const HEAD_BYTES = 8 * 1024;
 
-const sessions = new Map();
+const sessions = new Map();       // key -> session record
 const sseClients = new Set();
-const mergedBranches = new Map();
 let lastSnapshot = '';
+let viewedAt = new Map();         // sessionId/conversationId -> ms (from Desktop state, best-effort)
+
+// ---------- helpers ----------
 
 async function safeStat(p) { try { return await stat(p); } catch { return null; } }
+async function safeReaddir(p) {
+  try { return await readdir(p, { withFileTypes: true }); } catch { return []; }
+}
 async function readHead(file) {
   const buf = await readFile(file);
   return buf.subarray(0, Math.min(HEAD_BYTES, buf.length)).toString('utf-8');
@@ -59,19 +82,17 @@ function parseLines(text, dropFirst) {
   return out;
 }
 
-function deriveStatus({ lastEvent, lastEventTime, mtimeMs }) {
+function deriveStatus({ lastEventTime, mtimeMs }) {
   const ref = Math.max(lastEventTime || 0, mtimeMs || 0);
   const age = Date.now() - ref;
   if (age > IDLE_MS) return 'idle';
   if (age < VERY_RECENT_MS) return 'working';
-  // Anything else: Claude wrote something and stopped. From the JSONL alone
-  // we can't reliably tell "finished cleanly" from "stopped mid-flow", so we
-  // collapse both into "awaiting" and let the dashboard decide read/unread
-  // by tracking the user's last interaction with each session.
   return 'awaiting';
 }
 
-async function scanFile(filePath) {
+// ---------- Claude Code scanner ----------
+
+async function scanCodeFile(filePath) {
   const st = await safeStat(filePath);
   if (!st || !st.isFile()) return null;
 
@@ -100,58 +121,273 @@ async function scanFile(filePath) {
 
   if (!sessionId) sessionId = path.basename(filePath, '.jsonl');
   const lastEventTime = lastEvent?.timestamp ? Date.parse(lastEvent.timestamp) : st.mtimeMs;
-  const mergedKey = cwd && gitBranch ? `${cwd}::${gitBranch}` : null;
-  const branchMerged = mergedKey ? mergedBranches.get(mergedKey) === true : false;
+  const eventTime = Math.max(lastEventTime || 0, st.mtimeMs);
 
-  const status = deriveStatus({
-    lastEvent,
-    lastEventTime,
-    mtimeMs: st.mtimeMs,
-  });
+  // Worktree heuristic: parent directory contains "claude-worktrees"
+  const isWorktree = /claude-worktrees/i.test(filePath);
 
   return {
+    key: `code:${sessionId}`,
+    type: 'code',
     sessionId,
-    filePath,
+    title: aiTitle,
     project: cwd ? path.basename(cwd) : path.basename(path.dirname(filePath)),
     cwd,
     gitBranch,
-    title: aiTitle,
-    lastEventTime: Math.max(lastEventTime || 0, st.mtimeMs),
-    status,
-    branchMerged,
+    isWorktree,
+    filePath,
+    lastEventTime: eventTime,
+    mtime: st.mtimeMs,
+    status: deriveStatus({ lastEventTime: eventTime, mtimeMs: st.mtimeMs }),
   };
 }
 
 async function listRecentJsonl(dir, out = []) {
-  let entries;
-  try { entries = await readdir(dir, { withFileTypes: true }); } catch { return out; }
-  for (const e of entries) {
+  for (const e of await safeReaddir(dir)) {
     const p = path.join(dir, e.name);
     if (e.isDirectory()) {
-      if (e.name === 'memory') continue;
+      if (e.name === 'memory' || e.name === 'subagents' || e.name === 'tool-results') continue;
       await listRecentJsonl(p, out);
     } else if (e.isFile() && e.name.endsWith('.jsonl')) {
       const st = await safeStat(p);
-      if (!st) continue;
-      // Pre-filter: drop sessions older than the hidden threshold (~7d) before
-      // touching them. Anything within that window is kept so we can show it
-      // grayed if it crosses into idle territory.
-      if (Date.now() - st.mtimeMs > HIDDEN_MS) continue;
+      if (!st || Date.now() - st.mtimeMs > HIDDEN_MS) continue;
       out.push(p);
     }
   }
   return out;
 }
 
-async function fullScan() {
+async function scanCode() {
   const files = await listRecentJsonl(PROJECTS_DIR);
-  const next = new Map();
-  for (const p of files) {
-    const data = await scanFile(p);
-    if (data) next.set(p, data);
+  const found = new Map();
+  for (const f of files) {
+    const data = await scanCodeFile(f);
+    if (data) found.set(data.key, data);
   }
+  return found;
+}
+
+// ---------- Cowork scanner ----------
+
+async function scanCowork() {
+  const out = new Map();
+  const accountDirs = await safeReaddir(COWORK_DIR);
+  for (const acct of accountDirs) {
+    if (!acct.isDirectory()) continue;
+    const acctPath = path.join(COWORK_DIR, acct.name);
+    const sessionDirs = await safeReaddir(acctPath);
+    for (const sess of sessionDirs) {
+      if (!sess.isDirectory()) continue;
+      const sessPath = path.join(acctPath, sess.name);
+      // Each session dir contains one or more local_<task>.json files
+      const files = await safeReaddir(sessPath);
+      let latestMtime = 0, latestEvent = 0, title = null;
+      let taskCount = 0;
+      for (const f of files) {
+        if (!f.isFile() || !f.name.startsWith('local_') || !f.name.endsWith('.json')) continue;
+        taskCount++;
+        const fp = path.join(sessPath, f.name);
+        const st = await safeStat(fp);
+        if (!st) continue;
+        if (st.mtimeMs > latestMtime) latestMtime = st.mtimeMs;
+        // Best-effort field extraction — we don't know the exact schema yet.
+        try {
+          const txt = await readFile(fp, 'utf-8');
+          const obj = JSON.parse(txt);
+          for (const key of ['title', 'name', 'displayName', 'taskTitle', 'description', 'summary']) {
+            if (!title && typeof obj?.[key] === 'string' && obj[key].length < 200) {
+              title = obj[key]; break;
+            }
+          }
+          for (const key of ['updatedAt', 'updated_at', 'modifiedAt', 'lastUpdate', 'timestamp']) {
+            const v = obj?.[key];
+            if (typeof v === 'string') {
+              const t = Date.parse(v);
+              if (!Number.isNaN(t) && t > latestEvent) latestEvent = t;
+            } else if (typeof v === 'number') {
+              const t = v > 1e12 ? v : v * 1000;
+              if (t > latestEvent) latestEvent = t;
+            }
+          }
+        } catch {}
+      }
+      if (taskCount === 0 || Date.now() - latestMtime > HIDDEN_MS) continue;
+      const eventTime = Math.max(latestEvent, latestMtime);
+      out.set(`cowork:${sess.name}`, {
+        key: `cowork:${sess.name}`,
+        type: 'cowork',
+        sessionId: sess.name,
+        title: title || `Cowork ${sess.name.slice(0, 8)}…`,
+        project: `${taskCount} task${taskCount > 1 ? 's' : ''}`,
+        lastEventTime: eventTime,
+        mtime: latestMtime,
+        status: deriveStatus({ lastEventTime: eventTime, mtimeMs: latestMtime }),
+      });
+    }
+  }
+  return out;
+}
+
+// ---------- LevelDB readers (Desktop state, Chat) ----------
+
+async function snapshotLevelDb(srcDir, label) {
+  const dest = path.join(SNAPSHOT_TMP, label);
+  try { await rm(dest, { recursive: true, force: true }); } catch {}
+  await mkdir(dest, { recursive: true });
+  try { await cp(srcDir, dest, { recursive: true, errorOnExist: false, force: true }); }
+  catch (e) { return null; }
+  return dest;
+}
+
+async function openLevel(srcDir, label) {
+  if (!ClassicLevel) return null;
+  const snap = await snapshotLevelDb(srcDir, label);
+  if (!snap) return null;
+  try {
+    const db = new ClassicLevel(snap, { valueEncoding: 'view' });
+    await db.open();
+    return db;
+  } catch (e) {
+    console.warn(`[sidecar] couldn't open LevelDB at ${srcDir}:`, e.message);
+    return null;
+  }
+}
+
+// shared_proto_db keys look like protobuf-encoded blobs. We scan all keys and
+// look for UUID-shaped strings within them — those are likely sessionIds — and
+// keep the most recent millisecond-scale timestamp we can find paired with each.
+// This is best-effort. It does not require knowing the proto schema.
+async function scanDesktopState() {
+  const db = await openLevel(SHARED_DB_DIR, 'shared_proto');
+  if (!db) return new Map();
+  const next = new Map();
+  const uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+  try {
+    for await (const [key, value] of db.iterator()) {
+      const keyStr = Buffer.isBuffer(key) ? key.toString('utf-8') : String(key);
+      const valStr = Buffer.isBuffer(value) ? value.toString('binary') : String(value);
+      const blob = keyStr + '\x00' + valStr;
+      const uuids = blob.match(uuidRe);
+      if (!uuids) continue;
+      // Extract little-endian 8-byte timestamps that look like ms since epoch
+      // (between 2023 and 2030)
+      let bestTs = 0;
+      const buf = Buffer.from(valStr, 'binary');
+      for (let i = 0; i + 8 <= buf.length; i++) {
+        const v = Number(buf.readBigUInt64LE(i));
+        if (v > 1_700_000_000_000 && v < 1_900_000_000_000) {
+          if (v > bestTs) bestTs = v;
+        }
+      }
+      if (bestTs === 0) continue;
+      for (const u of new Set(uuids)) {
+        const prev = next.get(u) || 0;
+        if (bestTs > prev) next.set(u, bestTs);
+      }
+    }
+  } catch (e) {
+    console.warn('[sidecar] desktop state iteration failed:', e.message);
+  } finally {
+    try { await db.close(); } catch {}
+  }
+  return next;
+}
+
+// Chat scanner: iterate IndexedDB keys, surface anything that looks like a
+// conversation entry. The values are Blink-serialized so we can't fully parse,
+// but conversation titles are stored as UTF-16 strings inside — we recover them
+// with a simple decoder pass.
+async function scanChat() {
+  const db = await openLevel(INDEXEDDB_DIR, 'idb');
+  if (!db) return new Map();
+  const out = new Map();
+  try {
+    for await (const [key, value] of db.iterator()) {
+      const keyStr = Buffer.isBuffer(key) ? key.toString('utf-8', 0) : String(key);
+      // IndexedDB keys typically embed the object-store id; we look for the
+      // conversation pattern heuristically.
+      if (!/conversation/i.test(keyStr) && !/chat/i.test(keyStr)) continue;
+      const buf = Buffer.isBuffer(value) ? value : Buffer.from(String(value), 'binary');
+
+      // Find a UUID in the key or value
+      const uuidMatch = (keyStr + '\x00' + buf.toString('binary')).match(
+        /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+      );
+      if (!uuidMatch) continue;
+      const conversationId = uuidMatch[0];
+
+      // Pull printable ASCII / UTF-8 runs from the value, hope one of them
+      // is the title. Take the first plausible one (length 5..120).
+      let title = null;
+      const ascii = buf.toString('utf-8');
+      const runs = ascii.match(/[ -~][ -~ -￿]{4,120}/g) || [];
+      for (const r of runs) {
+        if (!/^[A-Za-zÀ-ſ]/.test(r)) continue;
+        title = r.trim(); break;
+      }
+
+      // Pull a 64-bit LE ms timestamp if present (likely updated_at)
+      let bestTs = 0;
+      for (let i = 0; i + 8 <= buf.length; i++) {
+        const v = Number(buf.readBigUInt64LE(i));
+        if (v > 1_700_000_000_000 && v < 1_900_000_000_000) {
+          if (v > bestTs) bestTs = v;
+        }
+      }
+      const eventTime = bestTs || Date.now();
+      if (Date.now() - eventTime > HIDDEN_MS) continue;
+
+      // De-dup: keep the one with the most recent timestamp per conversationId
+      const prev = out.get(`chat:${conversationId}`);
+      if (prev && prev.lastEventTime >= eventTime) continue;
+      out.set(`chat:${conversationId}`, {
+        key: `chat:${conversationId}`,
+        type: 'chat',
+        sessionId: conversationId,
+        title: title || `Conversation ${conversationId.slice(0, 8)}…`,
+        project: null,
+        lastEventTime: eventTime,
+        mtime: eventTime,
+        status: deriveStatus({ lastEventTime: eventTime, mtimeMs: eventTime }),
+      });
+    }
+  } catch (e) {
+    console.warn('[sidecar] chat iteration failed:', e.message);
+  } finally {
+    try { await db.close(); } catch {}
+  }
+  return out;
+}
+
+// ---------- aggregation ----------
+
+async function fullScan() {
+  const [code, cowork] = await Promise.all([scanCode(), scanCowork()]);
+  const next = new Map([...code, ...cowork]);
+
+  // Apply viewedAt from desktop state if we have any
+  for (const s of next.values()) {
+    const v = viewedAt.get(s.sessionId);
+    if (v) s.viewedAt = v;
+  }
+
   sessions.clear();
   for (const [k, v] of next) sessions.set(k, v);
+
+  const snap = JSON.stringify(snapshot());
+  if (snap !== lastSnapshot) {
+    lastSnapshot = snap;
+    broadcast({ type: 'snapshot', sessions: snapshot() });
+  }
+}
+
+async function refreshLevelDbState() {
+  if (!ClassicLevel) return;
+  const [vMap, chatMap] = await Promise.all([scanDesktopState(), scanChat()]);
+  viewedAt = vMap;
+
+  // Merge chat sessions into the live map
+  for (const s of chatMap.values()) sessions.set(s.key, s);
 
   const snap = JSON.stringify(snapshot());
   if (snap !== lastSnapshot) {
@@ -169,37 +405,17 @@ function snapshot() {
   });
 }
 
-async function refreshGitMerged() {
-  const seen = new Set();
-  for (const data of sessions.values()) {
-    if (!data.gitBranch) continue;
-    const cwd = data.cwd || (data.filePath ? path.dirname(data.filePath) : null);
-    if (!cwd) continue;
-    const key = `${cwd}::${data.gitBranch}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    let merged = false;
-    for (const base of ['main', 'master']) {
-      try {
-        const { stdout } = await execP(`git -C "${cwd}" branch --merged ${base} 2>/dev/null`);
-        if (stdout.split('\n').some(l => l.replace(/^\*?\s+/, '').trim() === data.gitBranch)) {
-          merged = true; break;
-        }
-      } catch {}
-    }
-    mergedBranches.set(key, merged);
-  }
-}
-
 function broadcast(msg) {
   const data = `data: ${JSON.stringify(msg)}\n\n`;
   for (const res of sseClients) { try { res.write(data); } catch {} }
 }
 
+// ---------- HTTP server ----------
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
 };
 async function serveStatic(res, filePath) {
@@ -241,19 +457,22 @@ const server = createServer(async (req, res) => {
   res.writeHead(404).end('not found');
 });
 
+// ---------- main ----------
+
 (async () => {
-  console.log(`[sidecar] scanning ${PROJECTS_DIR} ...`);
-  const exists = await safeStat(PROJECTS_DIR);
-  if (!exists) {
-    console.error(`[sidecar] ${PROJECTS_DIR} does not exist. Have you run Claude Code at least once?`);
+  console.log('[sidecar] starting...');
+  if (!(await safeStat(PROJECTS_DIR))) {
+    console.error(`[sidecar] ${PROJECTS_DIR} not found — have you run Claude Code at least once?`);
     process.exit(1);
   }
   await fullScan();
-  await refreshGitMerged();
-  await fullScan(); // re-derive statuses now that merged state is known
-  console.log(`[sidecar] ready → http://localhost:${PORT}/  (showing ${sessions.size} active sessions, refresh every ${POLL_INTERVAL_MS}ms)`);
+  if (ClassicLevel) await refreshLevelDbState();
+  const counts = { code: 0, cowork: 0, chat: 0 };
+  for (const s of sessions.values()) counts[s.type] = (counts[s.type] || 0) + 1;
+  console.log(`[sidecar] ready → http://localhost:${PORT}/`);
+  console.log(`[sidecar]   code: ${counts.code} sessions, cowork: ${counts.cowork}, chat: ${counts.chat}`);
 
   setInterval(fullScan, POLL_INTERVAL_MS);
-  setInterval(refreshGitMerged, GIT_POLL_MS);
+  if (ClassicLevel) setInterval(refreshLevelDbState, LEVELDB_POLL_MS);
   server.listen(PORT, '127.0.0.1');
 })();

@@ -155,11 +155,14 @@
     .session.idle { opacity: 0.55; }
     .session { cursor: pointer; user-select: none; }
     .session-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .session-status { font-size: 0.72rem; padding: 1px 6px; border-radius: 4px; margin-left: 6px; vertical-align: middle; }
-    .session-status.working { background: rgba(37,99,235,0.15); color: #2563eb; }
-    .session-status.unread  { background: rgba(22,163,74,0.18); color: #15803d; font-weight: 500; }
-    .session-status.read    { background: var(--panel-2); color: var(--muted); }
-    .session-status.idle    { background: var(--panel-2); color: var(--muted); }
+    .type-badge {
+      font-size: 0.65rem; padding: 1px 5px; border-radius: 3px; margin-right: 6px;
+      font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;
+      vertical-align: middle;
+    }
+    .type-badge.code   { background: rgba(37,99,235,0.15);   color: #2563eb; }
+    .type-badge.cowork { background: rgba(168,85,247,0.15);  color: #9333ea; }
+    .type-badge.chat   { background: rgba(234,88,12,0.15);   color: #ea580c; }
     .session-when  { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
     .session-project { color: var(--muted); font-size: 0.78rem; margin-left: 8px; }
 
@@ -510,19 +513,6 @@
     let liveSessions = [];
     let sidecarAlive = false;
 
-    const READ_KEY = 'claude-dashboard:read:v1';
-    const readMap = (() => {
-      try { return new Map(Object.entries(JSON.parse(localStorage.getItem(READ_KEY) || '{}'))); }
-      catch { return new Map(); }
-    })();
-    function saveReadMap() {
-      localStorage.setItem(READ_KEY, JSON.stringify(Object.fromEntries(readMap)));
-    }
-    function markRead(sessionId, eventTime) {
-      readMap.set(sessionId, eventTime);
-      saveReadMap();
-    }
-
     const STATUS_LABEL = {
       working: 'en cours',
       unread:  'pas encore lu',
@@ -532,13 +522,14 @@
     const FILTERS = ['actifs', 'tout'];
     let currentFilter = 'actifs'; // 'actifs' hides idle; 'tout' shows everything
 
-    // Combine sidecar status + local read-state to determine final visual class
+    // Combine sidecar status + Desktop's viewedAt (if available) to determine
+    // the visual class. The sidecar tries to extract a real lastViewedAt from
+    // Claude Desktop's shared_proto_db; if that's available it's authoritative.
+    // If not, an awaiting session is treated as unread until further notice.
     function visualStatus(s) {
       if (s.status === 'working') return 'working';
       if (s.status === 'idle')    return 'idle';
-      // sidecar said 'awaiting' → split into unread/read based on local memory
-      const seenAt = readMap.get(s.sessionId);
-      if (seenAt && seenAt >= s.lastEventTime) return 'read';
+      if (s.viewedAt && s.viewedAt >= s.lastEventTime) return 'read';
       return 'unread';
     }
 
@@ -593,40 +584,35 @@
       }
 
       sessionsListEl.innerHTML = visible.map(({ s, v }) => `
-        <div class="session ${v}" data-session-id="${escapeHtml(s.sessionId)}" data-event-time="${s.lastEventTime}" title="${escapeHtml(STATUS_LABEL[v] || v)} — clic pour ouvrir et marquer lu">
+        <div class="session ${v}" data-session-id="${escapeHtml(s.sessionId)}" data-type="${s.type}" title="${escapeHtml(STATUS_LABEL[v] || v)} — clic pour ouvrir">
           <span class="dot ${v}"></span>
           <div class="session-title">
+            <span class="type-badge ${s.type}">${s.type}</span>
             ${escapeHtml(s.title || s.sessionId.slice(0, 8) + '…')}
-            <span class="session-status ${v}">${STATUS_LABEL[v]}</span>
             ${s.project ? `<span class="session-project">${escapeHtml(s.project)}</span>` : ''}
           </div>
           <span class="session-when">${relTime(s.lastEventTime)}</span>
         </div>
       `).join('');
       sessionsListEl.querySelectorAll('.session').forEach(el => {
-        el.addEventListener('click', () => {
-          const id = el.dataset.sessionId;
-          const t = parseInt(el.dataset.eventTime, 10);
-          markRead(id, t);
-          renderSessions();
-          openClaudeCodeSession(id);
-        });
+        el.addEventListener('click', () => openSession(el.dataset.type, el.dataset.sessionId));
       });
     }
 
-    async function openClaudeCodeSession(sessionId) {
+    async function openSession(type, sessionId) {
       if (!sessionId) return;
-      // Undocumented pattern — try it; if Claude Desktop ignores, the CLI
-      // command in the clipboard is the fallback the user can paste.
-      const deepLink = `claude://code/${sessionId}`;
-      try { window.location.href = deepLink; } catch {}
+      let deepLink, fallback;
+      if (type === 'code')   { deepLink = `claude://code/${sessionId}`;          fallback = `claude --resume ${sessionId}`; }
+      else if (type === 'chat')   { deepLink = `claude://claude.ai/chat/${sessionId}`; fallback = null; }
+      else if (type === 'cowork') { deepLink = `claude://cowork/${sessionId}`;        fallback = null; }
+      else return;
 
-      const cmd = `claude --resume ${sessionId}`;
-      try {
-        await navigator.clipboard.writeText(cmd);
-        toast(`Ouverture tentée — commande copiée : ${cmd}`);
-      } catch {
-        toast(`Pour reprendre : ${cmd}`);
+      try { window.location.href = deepLink; } catch {}
+      if (fallback) {
+        try { await navigator.clipboard.writeText(fallback); toast(`Tentative + copié : ${fallback}`); }
+        catch { toast(`Ouverture tentée. Fallback : ${fallback}`); }
+      } else {
+        toast('Ouverture dans Claude Desktop…');
       }
     }
 
